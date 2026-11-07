@@ -2,9 +2,6 @@
 
 Rust firmware for the [BBC micro:bit](https://microbit.org). The v2 is the board I'm writing for, and everything builds for the v1 too. Each firmware is its own folder under `firmware/`, on top of a small `board` crate that hides which micro:bit it's running on.
 
-> [!NOTE]
-> Nothing here has run on a real micro:bit yet. It builds, and the logic is tested on the host, and that's all.
-
 ## The boards
 
 | | v1 (1.3, 1.5) | v2 (2.0, 2.2x) |
