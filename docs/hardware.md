@@ -44,7 +44,7 @@ Both boards have 25 red LEDs in a 5×5 grid. How they're wired differs:
 
 On both, the matrix is multiplexed in software: only one row is lit at a time, so something has to keep refreshing it. Some column pins are also edge connector pins, so using those pins means turning the display off ([schematic notes](https://tech.microbit.org/hardware/schematic/#leds)). Confirmed. `board` leaves both of these to the BSP's display driver.
 
-The v2 page lists brightness as "software controlled up to 255 steps" and the v1 as "10 steps". Those are what the micro:bit's own runtime does, not limits of the hardware. Likely.
+The v2 page lists brightness as "software controlled up to 255 steps" and the v1 as "10 steps". Those are what the micro:bit's own runtime does, not limits of the hardware. Likely. `board` gets ten levels by keeping each LED on for part of its row's 1 ms, from 8 µs to the whole of it, scanning at 333 Hz on the v1 and 200 Hz on the v2. On a v1.5 that shows no flicker and no ghosting that anyone could see. Confirmed on a v1.5, not yet tried on a v2.
 
 ## Buttons
 
