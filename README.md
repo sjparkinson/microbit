@@ -19,6 +19,7 @@ The v2 has a notched edge connector and a speaker on the back, which is the quic
 |---|---|
 | [heartbeat](firmware/heartbeat) | A heart beating on the 5×5 matrix. A slows it down, B speeds it up. |
 | [hello](firmware/hello) | HELLO WORLD! scrolling across the matrix, over and over. |
+| [level](firmware/level) | A spirit level: a dot rolls to the low side of the matrix. Needs an LSM303AGR, so a v1.5 or a v2 that has one. |
 | [life](firmware/life) | Conway's Game of Life on a wrapping 5×5 grid. Once it settles, it wipes across to a new soup or a glider, blinker or toad. A starts over, B pauses. |
 
 `cargo xtask list` prints the same list from what's in `firmware/`.
