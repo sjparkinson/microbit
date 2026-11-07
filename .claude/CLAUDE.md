@@ -29,7 +29,9 @@ Plain `cargo test` only tests the root package, which has nothing in it, so alwa
 - **Flashing needs a micro:bit on USB.** Flashing can't damage the board, so running `cargo xtask flash` is fine when the user's asked for it. It talks CMSIS-DAP over USB HID (IOKit on macOS), which the sandbox blocks, so it needs the sandbox off; `--drive` writes outside the repo, which it blocks too. There's no probe-rs or `cargo flash` here, on purpose; don't add them back. Test any change to `xtask/src/dap.rs` or `nrf.rs` against the fake chip in `xtask/src/fake.rs` first, and add a case there for anything new.
 - **Nothing has run on hardware until the user says it has.** A build that passes isn't a board that works. Don't write it up as if it were.
 - **Mark uncertainty.** docs/hardware.md labels facts confirmed or likely. Keep doing that, and don't promote a guess.
-- **Git writes need the sandbox off** in this repo, since it denies writes to `.git`. Commits are single-line Conventional Commits, straight to main, and the pre-commit hook runs the host tests first.
+- **Git writes need the sandbox off** in this repo, since it denies writes to `.git`. Commits are single-line Conventional Commits, and the pre-commit hook runs the host tests first.
+- **Changes go in by pull request.** A ruleset blocks direct pushes to main and requires `test` and CodeQL to pass, with no bypass, so `--admin` doesn't help. Branch, push with `git push origin <branch>`, open it with `gh pr create --head <branch>`, then `gh pr merge --rebase --auto`.
+- **PRs merge by rebase only**, so every commit on a branch lands on main as written. Keep each one single-line and passing.
 
 ## Things that look wrong but aren't
 
