@@ -19,6 +19,8 @@ pub struct Fake {
     /// A flash word that ignores writes, to check the verify.
     pub stuck_word: Option<u32>,
     pub running: bool,
+    /// Answer the next DAP_Transfer with WAIT before doing any of it.
+    pub wait_next_transfer: bool,
     powered: bool,
     sticky: bool,
     select: u32,
@@ -33,6 +35,7 @@ pub struct Fake {
 }
 
 const OK: u8 = 0x01;
+const WAIT: u8 = 0x02;
 const FAULT: u8 = 0x04;
 const MISMATCH: u8 = 0x10;
 
@@ -54,6 +57,7 @@ impl Fake {
             locked,
             stuck_word: None,
             running: true,
+            wait_next_transfer: false,
             powered: false,
             sticky: false,
             select: 0,
@@ -222,6 +226,9 @@ impl Fake {
     }
 
     fn transfer(&mut self, command: &[u8]) -> Vec<u8> {
+        if std::mem::take(&mut self.wait_next_transfer) {
+            return vec![0x05, 0, WAIT];
+        }
         let count = command[2];
         let mut at = 3;
         let mut done = 0u8;
