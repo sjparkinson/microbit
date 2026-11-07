@@ -212,6 +212,16 @@ impl<L: Link> Dap<L> {
 
     /// Runs `ops` as one DAP_Transfer and returns the words read.
     fn transfer(&mut self, ops: &[Op]) -> Result<Vec<u32>, String> {
+        let result = self.transfer_once(ops);
+        // `select` counts a SELECT write as done before it's sent, and a
+        // failed transfer may have stopped short of it, so forget it.
+        if result.is_err() {
+            self.select = None;
+        }
+        result
+    }
+
+    fn transfer_once(&mut self, ops: &[Op]) -> Result<Vec<u32>, String> {
         let mut command = vec![TRANSFER, 0, u8::try_from(ops.len()).expect("few ops")];
         for op in ops {
             command.push(op.request);
@@ -384,4 +394,29 @@ fn describe(ack: u8, done: usize, expected: usize) -> String {
         }
     };
     format!("{what} (after {done} of {expected} transfers, response {ack:#04x})")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fake::Fake;
+
+    /// The nRF52's CTRL-AP, and what its IDR reads.
+    const CTRL_AP: u8 = 1;
+    const IDR: u8 = 0xFC;
+
+    fn connected(fake: Fake) -> Dap<Fake> {
+        let mut dap = Dap::new(fake);
+        dap.connect(1_000_000).unwrap();
+        dap
+    }
+
+    #[test]
+    fn a_failed_transfer_doesnt_leave_select_pointing_at_the_wrong_ap() {
+        let mut dap = connected(Fake::nrf52(false));
+        dap.link.wait_next_transfer = true;
+        // The SELECT for AP 1 was in this transfer, which never ran.
+        assert!(dap.read_ap(CTRL_AP, IDR).is_err());
+        assert_eq!(dap.read_ap(CTRL_AP, IDR), Ok(0x0288_0000));
+    }
 }
