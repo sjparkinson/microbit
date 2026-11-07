@@ -7,8 +7,13 @@
 //! Firmware is found by listing firmware/*/Cargo.toml, so a new folder there
 //! needs no change here.
 
+mod dap;
 mod elf;
+#[cfg(test)]
+mod fake;
+mod hid;
 mod ihex;
+mod nrf;
 
 use std::env;
 use std::fmt::Display;
@@ -27,14 +32,17 @@ commands:
                                  given) for the v2 unless told otherwise, print
                                  flash and RAM use, and write
                                  target/firmware/<name>-<board>.hex and .elf
-  flash <name> [--board v1|v2] [--drive <path>]
-                                 build, then copy the hex onto the MICROBIT
-                                 drive (the v2 by default), after checking the
-                                 drive is the board you asked for
+  flash <name> [--board v1|v2] [--drive[=<path>]]
+                                 build, then program it over the USB port's
+                                 debug interface (CMSIS-DAP): erase, write,
+                                 verify and reset, after checking the board is
+                                 the one you asked for (the v2 by default).
+                                 --drive copies the hex onto the MICROBIT drive
+                                 instead
   check                          clippy with -D warnings, then build everything
                                  for both boards; what CI runs
 
-flash looks for the drive at /Volumes/MICROBIT, /media/$USER/MICROBIT and
+--drive looks for the drive at /Volumes/MICROBIT, /media/$USER/MICROBIT and
 /run/media/$USER/MICROBIT. Dragging the hex onto it by hand does the same.
 ";
 
@@ -75,21 +83,33 @@ impl Board {
         }
     }
 
-    /// Which board a MICROBIT drive is, from the board ID that starts the
-    /// "Unique ID" line in its DETAILS.TXT. The Foundation's universal hex
-    /// code (microbit-universal-hex, src/universal-hex.ts) has 0x9900 and
-    /// 0x9901 for the v1 and 0x9903 for the v2; 9904 to 9906 are my guess at
-    /// the later v2s. Nothing I've found documents the DETAILS.TXT line, so
-    /// anything this can't read gets a warning, never a refusal.
-    fn from_details(details: &str) -> Option<Self> {
-        let id = details.lines().find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            (key.trim() == "Unique ID").then(|| value.trim().get(..4))?
-        })?;
-        match id {
+    /// Which board a unique ID is for, from the board ID in its first four
+    /// digits. It's the USB serial number and the "Unique ID" line in
+    /// DETAILS.TXT. The Foundation's universal hex code
+    /// (microbit-universal-hex, src/universal-hex.ts) has 0x9900 and 0x9901
+    /// for the v1 and 0x9903 for the v2; 9904 to 9906 are my guess at the
+    /// later v2s. A v1.5 here reads 9901. Anything this can't read gets a
+    /// warning, never a refusal, and the flasher checks the chip itself too.
+    fn from_unique_id(id: &str) -> Option<Self> {
+        match id.get(..4)? {
             "9900" | "9901" => Some(Board::V1),
             "9903" | "9904" | "9905" | "9906" => Some(Board::V2),
             _ => None,
+        }
+    }
+
+    /// The board a MICROBIT drive is, from its DETAILS.TXT.
+    fn from_details(details: &str) -> Option<Self> {
+        details.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == "Unique ID").then(|| Self::from_unique_id(value.trim()))?
+        })
+    }
+
+    fn chip(self) -> nrf::Chip {
+        match self {
+            Board::V1 => nrf::Chip::Nrf51,
+            Board::V2 => nrf::Chip::Nrf52,
         }
     }
 
@@ -113,9 +133,17 @@ enum Task {
     List,
     /// `None` builds every firmware.
     Build(Option<String>, Vec<Board>),
-    /// `None` looks for the drive in the usual places.
-    Flash(String, Board, Option<PathBuf>),
+    Flash(String, Board, Via),
     Check,
+}
+
+/// How `flash` gets the image onto the board.
+#[derive(Debug, PartialEq, Eq)]
+enum Via {
+    /// CMSIS-DAP over the USB port's HID interface.
+    Debug,
+    /// A copy onto the MICROBIT drive; `None` looks in the usual places.
+    Drive(Option<PathBuf>),
 }
 
 fn main() -> ExitCode {
@@ -138,9 +166,10 @@ fn main() -> ExitCode {
         Task::Build(name, boards) => {
             selected(name.as_deref()).and_then(|names| build(&names, &boards).map(drop))
         }
-        Task::Flash(name, board, drive) => {
-            selected(Some(&name)).and_then(|_| flash(&name, board, drive))
-        }
+        Task::Flash(name, board, via) => selected(Some(&name)).and_then(|_| match via {
+            Via::Debug => flash(&name, board),
+            Via::Drive(drive) => copy(&name, board, drive),
+        }),
         Task::Check => check(),
     };
 
@@ -174,12 +203,9 @@ fn parse(args: &[&str]) -> Result<Task, String> {
             _ if arg.starts_with("--board=") => {
                 board = Some(Board::parse(&arg["--board=".len()..])?);
             }
-            "--drive" => {
-                let value = rest.next().ok_or("--drive needs the drive's path")?;
-                drive = Some(PathBuf::from(value));
-            }
+            "--drive" => drive = Some(Via::Drive(None)),
             _ if arg.starts_with("--drive=") => {
-                drive = Some(PathBuf::from(&arg["--drive=".len()..]));
+                drive = Some(Via::Drive(Some(PathBuf::from(&arg["--drive=".len()..]))));
             }
             "-h" | "--help" => return Err(String::new()),
             _ if arg.starts_with('-') => return Err(format!("unknown option {arg}")),
@@ -211,7 +237,11 @@ fn parse(args: &[&str]) -> Result<Task, String> {
             Ok(Task::Build(name, boards))
         }
         "flash" if !all && !all_boards => match name {
-            Some(name) => Ok(Task::Flash(name, board.unwrap_or(Board::V2), drive)),
+            Some(name) => Ok(Task::Flash(
+                name,
+                board.unwrap_or(Board::V2),
+                drive.unwrap_or(Via::Debug),
+            )),
             None => Err("flash needs a firmware name; `cargo xtask list` shows them".into()),
         },
         "list" | "check" => Err(format!("{command} takes no arguments")),
@@ -311,6 +341,8 @@ struct Image {
     flash: u32,
     ram: u32,
     hex: PathBuf,
+    /// What goes into flash: each loadable segment's address and bytes.
+    segments: Vec<(u32, Vec<u8>)>,
 }
 
 /// Builds `names` for each of `boards`, one cargo run per board, then sizes
@@ -361,6 +393,12 @@ fn package(name: &str, board: Board) -> Result<Image, String> {
         flash: elf.flash_bytes(&board.flash()),
         ram: elf.ram_bytes(&board.ram()),
         hex,
+        segments: elf
+            .segments()
+            .iter()
+            .filter(|s| board.flash().contains(&s.address))
+            .map(|s| (s.address, s.data.clone()))
+            .collect(),
     })
 }
 
@@ -394,10 +432,69 @@ fn check() -> Result<(), String> {
     build(&names, &Board::ALL).map(drop)
 }
 
+/// The SWD clock. DAPLink on the v1's KL26 tops out well above this, and
+/// 1 MHz keeps a long or noisy cable out of the picture.
+const SWD_HZ: u32 = 1_000_000;
+
+/// Builds `name` for `board` and programs it over CMSIS-DAP: halt, erase the
+/// pages it needs, write, read back, reset.
+fn flash(name: &str, board: Board) -> Result<(), String> {
+    // Find the board before building, so a missing one fails fast.
+    let probes = hid::list()?;
+    let probe = match &probes[..] {
+        [probe] => probe.clone(),
+        [] => {
+            return Err(match find_drive("MAINTENANCE") {
+                Some(_) => "the micro:bit's in MAINTENANCE mode, so the reset button was held \
+                     as it powered up; unplug it and plug it back in without touching the button"
+                    .into(),
+                None => "there's no micro:bit on USB; plug one in with a data cable".into(),
+            });
+        }
+        _ => {
+            let serials: Vec<&str> = probes.iter().map(|p| p.serial.as_str()).collect();
+            return Err(format!(
+                "there's more than one micro:bit plugged in ({}); unplug all but one",
+                serials.join(", ")
+            ));
+        }
+    };
+    match Board::from_unique_id(&probe.serial) {
+        Some(found) if found != board => {
+            return Err(format!(
+                "the micro:bit plugged in ({}) is a {}, not a {}; pass --board {}",
+                probe.serial,
+                found.name(),
+                board.name(),
+                found.name()
+            ));
+        }
+        Some(_) => {}
+        None => eprintln!(
+            "warning: I don't know the board ID in {}, so I'll go by the chip alone",
+            probe.serial
+        ),
+    }
+
+    let image = build(&[name.to_string()], &[board])?.remove(0);
+    let mut dap = dap::Dap::new(hid::Hid::open(&probe)?);
+    let idcode = dap.connect(SWD_HZ)?;
+    println!("micro:bit {}, SWD IDCODE {idcode:#010x}", probe.serial);
+    let result = nrf::program(&mut dap, board.chip(), &image.segments, &mut |line| {
+        println!("  {line}")
+    });
+    // Let go of the target whatever happened, so DAPLink's own drive works.
+    let disconnected = dap.disconnect();
+    result?;
+    disconnected?;
+    println!("flashed {name} onto the {}", board.name());
+    Ok(())
+}
+
 /// Builds `name` for `board` and copies its hex onto the MICROBIT drive, which
 /// is the same as dragging it there: the interface chip programs the target
 /// and the drive ejects itself.
-fn flash(name: &str, board: Board, drive: Option<PathBuf>) -> Result<(), String> {
+fn copy(name: &str, board: Board, drive: Option<PathBuf>) -> Result<(), String> {
     // Find the drive before building, so a missing board fails fast.
     let drive = match drive {
         Some(drive) => drive,
@@ -572,23 +669,26 @@ mod tests {
     fn flash_needs_a_name_and_defaults_to_the_v2() {
         assert_eq!(
             args("flash heartbeat"),
-            Ok(Task::Flash("heartbeat".into(), Board::V2, None))
+            Ok(Task::Flash("heartbeat".into(), Board::V2, Via::Debug))
         );
         assert_eq!(
             args("flash heartbeat --board v1"),
-            Ok(Task::Flash("heartbeat".into(), Board::V1, None))
+            Ok(Task::Flash("heartbeat".into(), Board::V1, Via::Debug))
         );
-        let drive = Some(PathBuf::from("/mnt/MICROBIT"));
         assert_eq!(
-            args("flash heartbeat --drive /mnt/MICROBIT"),
-            Ok(Task::Flash("heartbeat".into(), Board::V2, drive.clone()))
+            args("flash heartbeat --drive"),
+            Ok(Task::Flash("heartbeat".into(), Board::V2, Via::Drive(None)))
         );
         assert_eq!(
             args("flash --drive=/mnt/MICROBIT heartbeat"),
-            Ok(Task::Flash("heartbeat".into(), Board::V2, drive))
+            Ok(Task::Flash(
+                "heartbeat".into(),
+                Board::V2,
+                Via::Drive(Some(PathBuf::from("/mnt/MICROBIT")))
+            ))
         );
-        assert!(args("flash heartbeat --drive").is_err());
-        assert!(args("build --drive /mnt/MICROBIT").is_err());
+        assert!(args("flash heartbeat --drive /mnt/MICROBIT").is_err());
+        assert!(args("build --drive").is_err());
         assert!(args("flash").unwrap_err().contains("needs a firmware name"));
         assert!(args("flash heartbeat --all-boards").is_err());
         assert!(args("flash --all").is_err());

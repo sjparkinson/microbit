@@ -1,6 +1,6 @@
 # Flashing
 
-There's nothing to install and no programmer to buy. The micro:bit's USB port goes to an interface chip running DAPLink, which shows up on your computer as a drive called MICROBIT. Copy a `.hex` onto it and the interface chip programs the target ([DAPLink page](https://tech.microbit.org/software/daplink-interface/)). A data-capable USB cable is all you need. Some cheap micro-USB cables only carry power, and with one of those nothing shows up at all.
+There's nothing to install and no programmer to buy. The micro:bit's USB port goes to an interface chip running DAPLink, which is two things at once: a CMSIS-DAP debug probe wired to the target's SWD pins, and a drive called MICROBIT that programs whatever `.hex` you copy onto it ([DAPLink page](https://tech.microbit.org/software/daplink-interface/)). A data-capable USB cable is all you need. Some cheap micro-USB cables only carry power, and with one of those nothing shows up at all.
 
 Flashing can't hurt the board. The interface chip is separate from the target, so "no matter what code you run on your micro:bit, or how you manage to crash the device, you can always still put a new program on using the USB connection" (same page).
 
@@ -11,9 +11,32 @@ cargo xtask flash heartbeat             # v2
 cargo xtask flash heartbeat --board v1  # v1
 ```
 
-That finds the MICROBIT drive, checks it's the board you asked for, builds a release image, and copies `target/firmware/heartbeat-v2.hex` (or `-v1`) onto it. It looks for the drive at `/Volumes/MICROBIT` on macOS, and `/media/$USER/MICROBIT` or `/run/media/$USER/MICROBIT` on Linux. Anywhere else, pass `--drive <path>`.
+That uses the debug probe, with a CMSIS-DAP client in `xtask` itself (`xtask/src/hid.rs`, `dap.rs` and `nrf.rs`). In order, it:
 
-The board check reads the "Unique ID" line in the drive's `DETAILS.TXT`, whose first four digits are a board ID. The micro:bit Foundation's [universal hex code](https://github.com/microbit-foundation/microbit-universal-hex/blob/main/src/universal-hex.ts) gives 9900 and 9901 for the v1 and 9903 for the v2. If the drive says one board and you asked for the other, `flash` stops before copying anything. If it can't make sense of the file it warns and carries on. That check matters more than it looks, because of the next bit.
+1. finds the micro:bit on USB (ID `0d28:0204`) and reads the board ID from the first four digits of its serial number, stopping if it's the other board;
+2. builds the release image;
+3. connects over SWD at 1 MHz and powers up the chip's debug port;
+4. halts the core, resets it with a vector catch so it stops before running anything, and checks its CPUID says Cortex-M0 (v1) or Cortex-M4 (v2);
+5. reads the flash page size and count from the FICR, erases each page the image touches through the NVMC, and writes the image a word at a time, waiting for the NVMC after each;
+6. reads every word back and compares;
+7. lets go of the core and resets it, so the firmware starts.
+
+Pages the image doesn't touch are left alone. On the v2 it checks the nRF52's access port protection first, and if it's on it erases the whole chip through the CTRL-AP, which is the only way back in. That path has only run against the fake chip in `xtask/src/fake.rs`, since only a v1 has been tried so far.
+
+The board IDs come from the micro:bit Foundation's [universal hex code](https://github.com/microbit-foundation/microbit-universal-hex/blob/main/src/universal-hex.ts), which gives 9900 and 9901 for the v1 and 9903 for the v2. A v1.5 here reports 9901. If `flash` doesn't recognise the ID it warns and goes by the CPUID alone.
+
+On Linux it uses `/dev/hidrawN`, which needs a udev rule for `0d28:0204` to work without root. That path hasn't been tried yet.
+
+## The MICROBIT drive
+
+```sh
+cargo xtask flash heartbeat --drive              # find the drive in the usual places
+cargo xtask flash heartbeat --drive=/mnt/MICROBIT
+```
+
+That copies `target/firmware/heartbeat-v2.hex` (or `-v1`) onto the drive instead. It looks at `/Volumes/MICROBIT` on macOS, and `/media/$USER/MICROBIT` or `/run/media/$USER/MICROBIT` on Linux, and checks the "Unique ID" line in the drive's `DETAILS.TXT` before copying.
+
+On macOS with a v1 (interface 0253), copies sometimes sit on the drive unprogrammed, and DAPLink eventually writes a `FAIL.TXT` saying "The transfer timed out". Copies made by `cp -X` went through every time I tried and copies written from Rust's `std::fs` often didn't, so `--drive` runs `cp -X`. I don't know the real cause; macOS writing the FAT drive late, or in an order DAPLink doesn't expect, is my guess. The debug probe doesn't have this problem, which is why it's the default.
 
 ## By hand
 
@@ -38,10 +61,12 @@ Only use firmware from microbit.org. The DAPLink page warns that firmware from a
 
 ## When it doesn't work
 
+- **"there's no micro:bit on USB".** Check the cable carries data: does the MICROBIT drive appear? On Linux, check the udev rule.
+- **"the target answered FAULT" or "no answer from the target".** Unplug it, plug it back in and try again. If a v2 keeps doing it, its access port protection may be on in a way the CTRL-AP path doesn't handle; `--drive` still works, since DAPLink does its own erase.
 - **The drive shows up as MAINTENANCE.** The reset button was held while it powered up. Unplug and plug back in without touching it. `cargo xtask flash` spots this and says so.
 - **Neither drive appears.** Probably a power-only cable, or a dead USB port. The red power LED on a v2 only says the board's powered, not that the data lines work.
 - **A `FAIL.TXT` appears on the drive.** DAPLink couldn't flash the hex, and the file says why. The Foundation keeps a [list of the error codes](https://support.microbit.org/en/support/solutions/articles/19000016969-micro-bit-error-codes) and DAPLink's [`error.c`](https://github.com/mbedmicro/DAPLink/blob/master/source/daplink/error.c) has the source of each message. A v1 hex on a v2 is one way to get one.
 
 ## Sandbox note
 
-Claude Code's sandbox can't write outside the repo, so `cargo xtask flash` fails there when it copies to the drive. If it does, run the command yourself.
+Claude Code's sandbox blocks USB HID and writes outside the repo, so `cargo xtask flash` needs the sandbox off, with or without `--drive`. If it fails there, run the command yourself.

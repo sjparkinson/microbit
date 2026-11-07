@@ -26,6 +26,10 @@ firmware/<name>/        one crate per firmware
   src/main.rs           a thin loop between board and the library (a stub on the host)
   build.rs              links with cortex-m-rt's link.x
 xtask/                  list, build, flash, check; no dependencies
+  src/hid.rs            the USB HID link to the interface chip (IOKit, hidraw); the only unsafe
+  src/dap.rs            CMSIS-DAP commands, and SWD register and memory access
+  src/nrf.rs            erase, write, verify and reset through the nRF's NVMC
+  src/fake.rs           a pretend micro:bit for the tests, at the CMSIS-DAP level
 docs/                   hardware, flashing
 ```
 
@@ -54,7 +58,7 @@ The v1 is the tighter of the two: a Cortex-M0 with 16 KB of RAM and no FPU, so f
 
 ## Unsafe
 
-`unsafe_code` is denied across the workspace. The BSPs and HALs do the register work, so there shouldn't be a reason to turn it back on. If there is, every `unsafe` block gets a `// SAFETY:` comment.
+`unsafe_code` is denied across the workspace. The BSPs and HALs do the register work, so firmware shouldn't need it. The one exception is `xtask/src/hid.rs`, which calls IOKit through its C API because xtask has no crates. Every `unsafe` block gets a `// SAFETY:` comment.
 
 ## Commits
 

@@ -39,16 +39,18 @@ cargo test --workspace
 
 ## Flashing
 
-Nothing to install. Plug the micro:bit in, and a drive called MICROBIT turns up.
+Nothing to install. Plug the micro:bit in with a data cable.
 
 ```sh
 cargo xtask flash heartbeat             # v2
 cargo xtask flash heartbeat --board v1  # v1
 ```
 
-That builds the hex and copies it onto the drive, which is all dragging it there does. The yellow LED by the USB port flickers while it writes, then the drive ejects itself and the firmware starts. Each hex is for one board only: the micro:bit Foundation says a v1 hex on a v2 gives an error, and a v2 hex on a v1 fails without saying anything. So `flash` reads the drive's `DETAILS.TXT` first, and stops if it's the other board.
+The interface chip on every micro:bit's USB port is a CMSIS-DAP debug probe, and `xtask` speaks that itself, with no probe-rs or OpenOCD. It halts the chip, erases the pages the firmware needs, writes it, reads every word back, and resets it. It checks the board ID in the USB serial number first, and the chip's CPU type once it's connected, so a v2 image never goes on a v1.
 
-[docs/flashing.md](docs/flashing.md) covers doing it by hand, updating the interface firmware and what to do when the drive won't show up.
+`cargo xtask flash heartbeat --drive` copies the hex onto the MICROBIT drive instead, which is the same as dragging it there. That works too, but on macOS the v1's interface chip sometimes gives up on a copy ("The transfer timed out").
+
+[docs/flashing.md](docs/flashing.md) has how it works, the drive, updating the interface firmware and what to do when it won't connect.
 
 ## Contributing
 
