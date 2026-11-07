@@ -21,7 +21,7 @@ The CMSIS-DAP client lives in `xtask` itself (`xtask/src/hid.rs`, `dap.rs` and `
 6. reads every word back and compares;
 7. lets go of the core and resets it, so the firmware starts.
 
-Only flash gets programmed. An image that puts anything outside it, such as UICR settings, fails at `cargo xtask build`, so the hex for the MICROBIT drive never holds something the debug probe would skip. Nothing here sets UICR yet; when something does, both paths will need to learn it together.
+Only flash gets programmed. An image that puts anything outside it, such as UICR settings, fails at `cargo xtask build`, so the .hex it writes never holds something the debug probe would skip. Nothing here sets UICR yet; when something does, the flasher will need to learn it.
 
 Pages the image doesn't touch are left alone. On the v2 it checks the nRF52's access port protection first, and if it's on it erases the whole chip through the CTRL-AP, which is the only way back in. On an nRF52833 with the hardened protection (revision 2, see [hardware.md](hardware.md#access-port-protection-on-the-v2)) it then sets UICR.APPROTECT to HwDisabled, and `board` writes APPROTECT.DISABLE as the firmware boots, so the port stays open after you unplug it and the next flash doesn't need to erase everything again. A firmware that never calls `board::Board::take` leaves the port to lock at the next power-up, and the flash after that erases the whole chip again. All of this has only run against the fake chip in `xtask/src/fake.rs`, since only a v1 has been tried so far.
 

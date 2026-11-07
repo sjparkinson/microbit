@@ -361,8 +361,8 @@ fn package(name: &str, board: Board) -> Result<Image, String> {
 }
 
 /// Refuses an image that puts anything outside `flash`, such as UICR
-/// settings. The debug probe only programs flash, so a hex that wrote the
-/// UICR through the MICROBIT drive would flash differently from it.
+/// settings. The debug probe only programs flash, so the .hex `build` writes
+/// mustn't hold anything it would skip.
 fn only_flash(segments: &[elf::Segment], flash: &Range<u32>) -> Result<(), String> {
     let outside = segments.iter().find(|s| {
         let end = u64::from(s.address) + s.data.len() as u64;
