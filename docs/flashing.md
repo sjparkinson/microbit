@@ -31,11 +31,23 @@ On Linux it uses `/dev/hidrawN`, which needs a udev rule for `0d28:0204` to work
 
 ## Updating the interface firmware
 
-Worth doing once on any board you didn't buy new. The current versions are 0253 for every v1, 0255 for a 2.00 and 0257 for a 2.2x ([DAPLink page](https://tech.microbit.org/software/daplink-interface/)). `DETAILS.TXT` on the MICROBIT drive says which one you've got.
+Worth doing once on any board you didn't buy new. [microbit.org's firmware page](https://microbit.org/get-started/user-guide/firmware/) offers 0249 for every v1 ("all boards use the same firmware"), 0255 for a 2.00 and 0257 for a 2.20 or 2.21. The [DAPLink page](https://tech.microbit.org/software/daplink-interface/) lists 0253 as the latest tested for the v1, but the download page doesn't offer it, so 0249 is what you'll get. `DETAILS.TXT` on the MICROBIT drive says which one you've got.
 
-1. Download the right file for your board from [microbit.org's firmware page](https://microbit.org/get-started/user-guide/firmware/). The page tells you how to identify the revision.
+1. Download the right file for your board from the firmware page. The revision is printed in the bottom right-hand corner on the back of the board.
 2. Unplug the micro:bit. Hold the reset button on the back, and plug it in while still holding it. A drive called MAINTENANCE appears instead of MICROBIT.
 3. Drag the firmware hex onto MAINTENANCE and wait for the yellow LED to stop flashing. The board resets and comes back as MICROBIT.
+
+### On macOS
+
+Dragging onto MAINTENANCE doesn't work on every Mac. On a v1.5 here (bootloader 0243), every copy failed, whether by Finder, `cp -X` or `dd`, and each left a `FAIL.TXT` saying "The transfer timed out". The usual fix, remounting the drive with `mount -o sync`, fails on current macOS because it can't load the old `msdosfs` kernel extension. A failed update leaves the board with no working interface firmware: no yellow LED, and no MICROBIT drive. The bootloader survives, though, so MAINTENANCE still comes up and you can try again.
+
+What worked was writing the hex straight onto the drive's data area with `dd`, past the FAT driver. DAPLink spots a hex by its content as the sectors arrive, so it doesn't need a directory entry. `scripts/daplink-update.sh` does it. It checks the drive is a small removable USB DAPLink disk, finds the data area from the FAT boot sector, and asks before writing:
+
+```sh
+sudo bash scripts/daplink-update.sh ~/Downloads/0249_kl26z_microbit_0x8000.hex
+```
+
+Check it names the right `/dev/diskN` before typing `yes`. Then replug without touching reset, and MICROBIT should come back. That's worked once, on that v1.5. I haven't tried it on a v2.
 
 Only use firmware from microbit.org. The DAPLink page warns that firmware from anywhere else "could damage your micro:bit, or make it impossible to re-flash", and that's the one way to break the USB side.
 
@@ -44,6 +56,7 @@ Only use firmware from microbit.org. The DAPLink page warns that firmware from a
 - **"there's no micro:bit on USB".** Check the cable carries data: does the MICROBIT drive appear? On Linux, check the udev rule.
 - **"the target answered FAULT" or "no answer from the target".** Unplug it, plug it back in and try again. If a v2 keeps doing it, its access port protection may be on in a way the CTRL-AP path doesn't handle.
 - **It says the micro:bit's in MAINTENANCE mode.** The reset button was held while it powered up. Unplug and plug back in without touching it.
+- **No yellow LED and no drive, but MAINTENANCE comes up with reset held.** The interface firmware is missing, most likely from an update that didn't finish. Put it back with the steps above, using `scripts/daplink-update.sh` on a Mac.
 
 ## Sandbox note
 
