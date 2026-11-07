@@ -11,6 +11,9 @@ pub const VENDOR: u16 = 0x0D28;
 pub const PRODUCT: u16 = 0x0204;
 /// DAPLink's HID reports are 64 bytes, with no report ID.
 const REPORT: usize = 64;
+/// How long to wait for the probe to answer one command.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A micro:bit on USB, by its serial number, which starts with the board ID.
 #[derive(Clone)]
@@ -72,11 +75,55 @@ mod linux {
     //! hidraw: each /sys/class/hidraw/hidrawN/device/uevent names the USB ID
     //! and serial, and /dev/hidrawN takes and gives raw reports.
 
+    use std::ffi::{c_int, c_short, c_ulong};
     use std::fs;
-    use std::io::{Read, Write};
+    use std::io::{self, Read, Write};
+    use std::os::fd::AsRawFd;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
-    use super::{PRODUCT, Probe, REPORT, VENDOR, report};
+    use super::{PRODUCT, Probe, REPORT, TIMEOUT, VENDOR, report};
+
+    /// poll(2)'s `struct pollfd`, from <poll.h>.
+    #[repr(C)]
+    struct PollFd {
+        fd: c_int,
+        events: c_short,
+        revents: c_short,
+    }
+
+    const POLLIN: c_short = 0x001;
+
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, nfds: c_ulong, timeout: c_int) -> c_int;
+    }
+
+    /// Waits up to `timeout` for `file` to have something to read, and says
+    /// whether it does.
+    fn readable(file: &fs::File, timeout: Duration) -> io::Result<bool> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let ms = c_int::try_from(left.as_millis()).unwrap_or(c_int::MAX);
+            let mut fd = PollFd {
+                fd: file.as_raw_fd(),
+                events: POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd, for an fd `file` keeps open.
+            let n = unsafe { poll(&raw mut fd, 1, ms) };
+            match n {
+                0 => return Ok(false),
+                1.. => return Ok(true),
+                _ => {
+                    let e = io::Error::last_os_error();
+                    if e.kind() != io::ErrorKind::Interrupted {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
 
     pub fn list() -> Result<Vec<Probe>, String> {
         let id = format!("HID_ID=0003:{:08X}:{:08X}", VENDOR, PRODUCT);
@@ -129,6 +176,14 @@ mod linux {
             self.0
                 .write_all(&out)
                 .map_err(|e| format!("writing to the probe: {e}"))?;
+            let ready =
+                readable(&self.0, TIMEOUT).map_err(|e| format!("waiting for the probe: {e}"))?;
+            if !ready {
+                return Err(format!(
+                    "the micro:bit didn't answer within {} s",
+                    TIMEOUT.as_secs()
+                ));
+            }
             let mut response = vec![0u8; REPORT];
             let n = self
                 .0
@@ -150,7 +205,7 @@ mod macos {
     use std::ffi::{CStr, c_char, c_void};
     use std::time::{Duration, Instant};
 
-    use super::{PRODUCT, Probe, REPORT, VENDOR, report};
+    use super::{PRODUCT, Probe, REPORT, TIMEOUT, VENDOR, report};
 
     type CFTypeRef = *const c_void;
     type CFIndex = isize;
@@ -444,9 +499,6 @@ mod macos {
             })
         }
     }
-
-    /// How long to wait for the probe to answer one command.
-    const TIMEOUT: Duration = Duration::from_secs(5);
 
     impl Drop for Hid {
         fn drop(&mut self) {
