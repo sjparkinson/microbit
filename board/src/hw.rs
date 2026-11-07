@@ -29,8 +29,14 @@ pub struct Board {
 
 impl Board {
     /// The board, the first time it's called. After that, `None`.
+    ///
+    /// On a v2 it also keeps the debug port open across resets, on the
+    /// nRF52833s that need telling (see `approtect.rs`). The v1 doesn't need
+    /// it.
     pub fn take() -> Option<Self> {
         let board = bsp::Board::take()?;
+        #[cfg(feature = "v2")]
+        crate::approtect::keep_debug_port_open();
         Some(Self {
             display: Display(blocking::Display::new(board.display_pins)),
             buttons: Buttons {

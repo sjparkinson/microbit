@@ -21,6 +21,18 @@ There are four board revisions in the wild: 1.3x and 1.5 (both "v1"), and 2.0 an
 
 The part, core, clock and sizes are from the [1.5](https://tech.microbit.org/hardware/1-5-revision/) and [2.2x](https://tech.microbit.org/hardware/2-2-revision/) revision pages (the [1.3x](https://tech.microbit.org/hardware/1-3-revision/) and [2.0](https://tech.microbit.org/hardware/2-0-revision/) pages say the same). Confirmed. Flash starts at 0x0 and RAM at 0x20000000 on both, which is where `xtask` counts them from and what the HALs' `memory.x` files say. Likely, from the HALs rather than a Nordic page. The targets are from the [nrf-rs README](https://github.com/nrf-rs/microbit/blob/e4265b5c9607ca52269184d14b2ae168958e8c37/README.md). Confirmed.
 
+### Access port protection on the v2
+
+The nRF52833 comes in two kinds here. Build codes Axx and earlier (revision 1) have protection off by default and controlled by the UICR alone. Build codes Bxx and later (revision 2) have the "hardened" kind, which is on by default and controlled by hardware and software together ([PS, Debug and trace](https://docs.nordicsemi.com/r/bundle/ps_nrf52833/page/dif.html); Nordic's [improved APPROTECT post](https://devzone.nordicsemi.com/nordic/nordic-blog/b/blog/posts/working-with-the-nrf52-series-improved-approtect) names revision 2 as Bx0). Confirmed. Which one a given micro:bit v2 has isn't written down anywhere I've found: the Foundation's [hardware repo](https://github.com/microbit-foundation/microbit-v2-hardware) BOMs list `nRF52833-QIAA` (2.0) and `nRF52833-QIAA-R` (2.21) with no build code. So treat either as possible on any v2. Likely.
+
+On a hardened chip:
+
+- A CTRL-AP ERASEALL erases flash, UICR and RAM and opens the port until a pin, power or brownout reset, a watchdog reset or a wake from System OFF (PS, same page). Confirmed. A soft reset (SYSRESETREQ, or the CTRL-AP's RESET register) isn't on that list, so it probably leaves the port open. Likely, from the list, and not tried.
+- Keeping it open across those resets takes two things: UICR.APPROTECT (0x10001208) set to HwDisabled (0x5A), and firmware writing SwDisable (0x5A) to APPROTECT.DISABLE (0x40000558) as it boots (PS, same page; addresses from nrfx's [`nrf52833.h`](https://github.com/NordicSemiconductor/nrfx/blob/e04a873799c0e7206166d62e2e4f185868acf8f9/bsp/stable/mdk/nrf52/nrf52833/nrf52833.h)). Confirmed. With only the UICR half, the port locks again at the next pin or power reset. Likely, since the PS describes both halves but not that case on its own. `nrfjprog --recover` does both: it writes HwDisabled and also programs a small image to keep it open (the blog post). Confirmed.
+- Nordic's startup code only touches APPROTECT.DISABLE on a hardened chip, which it spots by FICR words 0x10000130 reading 0x0D and 0x10000134 reading anything but 0. It then copies UICR.APPROTECT into DISABLE ([`nrf52_erratas.h`](https://github.com/NordicSemiconductor/nrfx/blob/e04a873799c0e7206166d62e2e4f185868acf8f9/bsp/stable/mdk/nrf52/nrf52_erratas.h) `nrf52_configuration_249`, [`system_nrf52_approtect.h`](https://github.com/NordicSemiconductor/nrfx/blob/e04a873799c0e7206166d62e2e4f185868acf8f9/bsp/stable/mdk/nrf52/system_nrf52_approtect.h)). Confirmed as what nrfx does. Those FICR words aren't in the PS. The nRF52833 PAC has no APPROTECT peripheral and nrf-hal 0.19 doesn't write it, so Rust firmware has to do it itself. Confirmed from the crate sources.
+
+`cargo xtask flash` writes the UICR half on a hardened chip and `board::Board::take` does the firmware half, both gated on that FICR check. Neither has run on a real v2.
+
 The M0 has no FPU and no hardware divide, so floats and division are software routines on the v1. That's the Cortex-M0, not something the micro:bit pages say. Likely, and it's why the v1 is the board to watch for size and speed.
 
 ## The LED matrix
@@ -114,3 +126,4 @@ Both read their core temperature from the Nordic chip: -25 to 75 °C, ±4 °C un
 - Does a 1.5 have an LSM303AGR, as I'm assuming from the "LSM303GR" typo?
 - Do the v2.0 and v2.2x put the interface chip at the same I2C address on the internal bus? Nothing here talks to it yet.
 - What board IDs do the 2.0, 2.20 and 2.21 report in `DETAILS.TXT`? Plugging each one in would settle it.
+- Which v2 revisions have a hardened nRF52833 (build code Bxx)? Reading FICR 0x10000134 over SWD on each would settle it, and so would the build code printed on the chip.

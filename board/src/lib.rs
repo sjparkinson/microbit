@@ -59,6 +59,11 @@ pub type Image = [[u8; 5]; 5];
 ))]
 mod hw;
 
+// The v1's nRF51822 has no such thing: its protection is UICR.RBPCONF alone,
+// which nothing here sets.
+#[cfg(all(feature = "v2", target_os = "none", target_abi = "eabihf"))]
+mod approtect;
+
 #[cfg(any(
     all(feature = "v1", target_os = "none", target_abi = "eabi"),
     all(feature = "v2", target_os = "none", target_abi = "eabihf"),
