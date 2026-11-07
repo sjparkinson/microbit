@@ -49,14 +49,40 @@ impl Board {
 /// its 25 LEDs as a 3×9 grid rather than 5×5; the BSP hides that.
 pub struct Display(blocking::Display);
 
+/// How long the BSP's blocking display lights each row, in milliseconds. It's
+/// the BSP's default.
+const ROW_MS: u32 = 2;
+
+/// How many rows the display scans: 5 on the v2, and 3 on the v1, which
+/// wires its 25 LEDs as a 3×9 grid.
+const ROWS: u32 = bsp::gpio::NUM_ROWS as u32;
+
 impl Display {
-    /// Shows `image` for about `duration_ms` milliseconds, then turns every
-    /// LED off.
+    /// Shows `image` for `duration_ms` milliseconds, on either board, then
+    /// turns every LED off.
     ///
-    /// It works in whole scans of 10 ms (2 ms a row), and rounds down, so
-    /// anything under 10 ms shows nothing.
+    /// The BSP only lights whole scans of the matrix at 2 ms a row, which is
+    /// 10 ms on the v2 and 6 ms on the v1, and on its own it returns early
+    /// by whatever's left over. This fills that remainder with one quicker
+    /// scan at 1 ms a row where it fits, so every row still gets the same
+    /// time lit, then waits out the rest (under a row's worth) dark. So a
+    /// 10 ms show on the v1 is 9 ms lit and 1 ms dark, and anything under
+    /// a quick scan (5 ms on the v2, 3 ms on the v1) is only a wait.
     pub fn show(&mut self, timer: &mut Timer, image: &Image, duration_ms: u32) {
-        self.0.show(&mut timer.0, *image, duration_ms);
+        let scan_ms = ROWS * ROW_MS;
+        let mut rest_ms = duration_ms % scan_ms;
+        self.0.show(&mut timer.0, *image, duration_ms - rest_ms);
+        // A whole scan at ROW_MS doesn't fit in `rest_ms`, so at most one at
+        // 1 ms a row does.
+        if rest_ms >= ROWS {
+            self.0.set_delay_ms(1);
+            self.0.show(&mut timer.0, *image, ROWS);
+            self.0.set_delay_ms(ROW_MS);
+            rest_ms -= ROWS;
+        }
+        if rest_ms > 0 {
+            timer.0.delay_ms(rest_ms);
+        }
     }
 
     /// Turns every LED off.

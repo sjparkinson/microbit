@@ -9,9 +9,9 @@
 
 use board::Image;
 
-/// How long one pass of the main loop takes, in milliseconds. It's one full
-/// scan of the matrix, which is the shortest thing the blocking display can
-/// show.
+/// How long one pass of the main loop takes, in milliseconds. `board`'s
+/// display shows a frame for exactly this long on both boards; it's one full
+/// scan of the v2's matrix, and a scan and a bit on the v1's.
 pub const TICK_MS: u32 = 10;
 
 /// The slowest the heart goes, in beats a minute.
