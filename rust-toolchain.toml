@@ -1,0 +1,13 @@
+# Both micro:bit targets are tier 2 on stable, so there's no nightly here.
+# The version is pinned anyway, so a new clippy lint or rustc warning lands in
+# its own commit instead of turning CI red on an unrelated change. Dependabot
+# opens the bump (.github/dependabot.yml); run `cargo xtask check` before
+# merging it.
+#
+# thumbv6m-none-eabi is the v1's nRF51822 (Cortex-M0), thumbv7em-none-eabihf
+# the v2's nRF52833 (Cortex-M4F).
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+targets = ["thumbv6m-none-eabi", "thumbv7em-none-eabihf"]
+profile = "minimal"
