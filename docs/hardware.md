@@ -1,8 +1,8 @@
 # Hardware
 
-What's on each micro:bit that firmware here cares about, and how sure I am about each bit. "Confirmed" means a primary source says so: the micro:bit Foundation's [tech site](https://tech.microbit.org/hardware/), Nordic's documentation, probe-rs's target files, or the nrf-rs BSP that `board` is built on. "Likely" means it follows from one of those, or from what I know of the chips, and I haven't found it written down. None of it has been checked on a real board by this repo.
+What's on each micro:bit that firmware here cares about, and how sure I am about each bit. "Confirmed" means a primary source says so: the micro:bit Foundation's [tech site](https://tech.microbit.org/hardware/), Nordic's documentation, or the nrf-rs BSP that `board` is built on. "Likely" means it follows from one of those, or from what I know of the chips, and I haven't found it written down. None of it has been checked on a real board by this repo.
 
-nrf-rs citations are pinned to [`e4265b5`](https://github.com/nrf-rs/microbit/tree/e4265b5c9607ca52269184d14b2ae168958e8c37) (October 2026), which is `microbit` and `microbit-v2` 0.16.0. probe-rs citations are to its `master` branch as of November 2026.
+nrf-rs citations are pinned to [`e4265b5`](https://github.com/nrf-rs/microbit/tree/e4265b5c9607ca52269184d14b2ae168958e8c37) (October 2026), which is `microbit` and `microbit-v2` 0.16.0.
 
 ## Telling them apart
 
@@ -18,9 +18,8 @@ There are four board revisions in the wild: 1.3x and 1.5 (both "v1"), and 2.0 an
 | Flash | 256 KB | 512 KB |
 | RAM | 16 KB | 128 KB |
 | Rust target | `thumbv6m-none-eabi` | `thumbv7em-none-eabihf` |
-| probe-rs chip | `nRF51822_xxAA` | `nRF52833_xxAA` |
 
-The part, core, clock and sizes are from the [1.5](https://tech.microbit.org/hardware/1-5-revision/) and [2.2x](https://tech.microbit.org/hardware/2-2-revision/) revision pages (the [1.3x](https://tech.microbit.org/hardware/1-3-revision/) and [2.0](https://tech.microbit.org/hardware/2-0-revision/) pages say the same). Confirmed. probe-rs's [`nRF51_Series.yaml`](https://github.com/probe-rs/probe-rs/blob/master/probe-rs/targets/nRF51_Series.yaml) gives `nRF51822_xxAA` flash at 0x0 to 0x40000 and RAM at 0x20000000 to 0x20004000, and [`nRF52_Series.yaml`](https://github.com/probe-rs/probe-rs/blob/master/probe-rs/targets/nRF52_Series.yaml) gives `nRF52833_xxAA` 0x0 to 0x80000 and 0x20000000 to 0x20020000, which agree. Confirmed. The targets are from the [nrf-rs README](https://github.com/nrf-rs/microbit/blob/e4265b5c9607ca52269184d14b2ae168958e8c37/README.md). Confirmed.
+The part, core, clock and sizes are from the [1.5](https://tech.microbit.org/hardware/1-5-revision/) and [2.2x](https://tech.microbit.org/hardware/2-2-revision/) revision pages (the [1.3x](https://tech.microbit.org/hardware/1-3-revision/) and [2.0](https://tech.microbit.org/hardware/2-0-revision/) pages say the same). Confirmed. Flash starts at 0x0 and RAM at 0x20000000 on both, which is where `xtask` counts them from and what the HALs' `memory.x` files say. Likely, from the HALs rather than a Nordic page. The targets are from the [nrf-rs README](https://github.com/nrf-rs/microbit/blob/e4265b5c9607ca52269184d14b2ae168958e8c37/README.md). Confirmed.
 
 The M0 has no FPU and no hardware divide, so floats and division are software routines on the v1. That's the Cortex-M0, not something the micro:bit pages say. Likely, and it's why the v1 is the board to watch for size and speed.
 
@@ -85,7 +84,7 @@ v1 from nrf-rs, v2 from nrf-rs and the pinmap. Confirmed. The pinmap names these
 
 ## The interface chip
 
-The USB port doesn't go to the target. It goes to a second microcontroller running Arm's [DAPLink](https://tech.microbit.org/software/daplink-interface/), which gives you the MICROBIT drive for drag-and-drop flashing, the serial port, and a CMSIS-DAP debug probe on the target's SWD pins. That last one is what probe-rs talks to. It has no connection to the edge connector. Confirmed.
+The USB port doesn't go to the target. It goes to a second microcontroller running Arm's [DAPLink](https://tech.microbit.org/software/daplink-interface/), which gives you the MICROBIT drive for drag-and-drop flashing, the serial port, and a CMSIS-DAP debug probe on the target's SWD pins. Only the drive is used here. It has no connection to the edge connector. Confirmed.
 
 | Revision | Interface chip | Shipped DAPLink | Latest tested |
 |---|---|---|---|
@@ -101,7 +100,9 @@ On the v1, the KL26 also contains the regulator that powers the rest of the boar
 
 The 1.5 and 2.0 pages list "JLink/OB (via different firmware)" as a debug option. That means replacing DAPLink, which nothing here needs. Confirmed as possible, and not something I've tried.
 
-So between the v2 revisions the target chip is the same and the interface chip isn't. Nothing I've found says that changes anything for firmware, apart from which interface firmware file to download. The 2.20 was the subject of a probe-rs issue about RTT connections dropping after a while ([#1235](https://github.com/probe-rs/probe-rs/issues/1235), open since 2022, with no fix confirmed). Likely to matter only if we start streaming over RTT.
+So between the v2 revisions the target chip is the same and the interface chip isn't. Nothing I've found says that changes anything for firmware, apart from which interface firmware file to download.
+
+The MICROBIT drive's `DETAILS.TXT` has a "Unique ID" line that starts with a four-digit board ID, which is how `cargo xtask flash` tells the boards apart. The Foundation's [`universal-hex.ts`](https://github.com/microbit-foundation/microbit-universal-hex/blob/main/src/universal-hex.ts) says "For micro:bit V1 (v1.3, v1.3B and v1.5) the `boardId` is `0x9900`, and for V2 `0x9903`", and also lists 0x9901 as a V1 ID. Confirmed for those three. I haven't found the IDs for each v2 revision, or anything documenting the `DETAILS.TXT` line itself, so `xtask` also takes 9904 to 9906 as a v2. Likely.
 
 ## Temperature
 
@@ -112,4 +113,4 @@ Both read their core temperature from the Nordic chip: -25 to 75 °C, ±4 °C un
 - What does the BSP do with P0.09 and P0.10 on the v2, and does a firmware need to set NFCPINS in the UICR to use them as GPIO?
 - Does a 1.5 have an LSM303AGR, as I'm assuming from the "LSM303GR" typo?
 - Do the v2.0 and v2.2x put the interface chip at the same I2C address on the internal bus? Nothing here talks to it yet.
-- Does probe-rs work against the v1's KL26 DAPLink as well as the v2's? I found no reports either way.
+- What board IDs do the 2.0, 2.20 and 2.21 report in `DETAILS.TXT`? Plugging each one in would settle it.

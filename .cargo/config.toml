@@ -7,13 +7,3 @@ xtask = "run --quiet --package xtask --"
 # and `cargo clippy --workspace` run there with every firmware as a stub. The
 # linker scripts come from each firmware's build.rs, so there are no rustflags
 # here either.
-#
-# `cargo run` on a micro:bit target flashes over the USB port's debug probe
-# and streams the output back, e.g.
-#   cargo run --release -p heartbeat --target thumbv7em-none-eabihf --features v2
-# It needs probe-rs (`cargo install probe-rs-tools --locked`).
-[target.thumbv6m-none-eabi]
-runner = "probe-rs run --chip nRF51822_xxAA"
-
-[target.thumbv7em-none-eabihf]
-runner = "probe-rs run --chip nRF52833_xxAA"

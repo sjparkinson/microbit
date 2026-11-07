@@ -1,5 +1,5 @@
 //! Intel HEX, the format the micro:bit's MICROBIT drive takes: drag a .hex on
-//! and the interface chip (DAPLink) programs it, no probe-rs needed.
+//! and the interface chip programs it.
 
 use std::fmt::Write;
 

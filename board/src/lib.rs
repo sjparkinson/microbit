@@ -3,10 +3,10 @@
 //! Turn on exactly one of the `v1` and `v2` features, and build for that
 //! board's target:
 //!
-//! | feature | target                  | probe-rs chip   |
-//! |---------|-------------------------|-----------------|
-//! | `v1`    | `thumbv6m-none-eabi`    | `nRF51822_xxAA` |
-//! | `v2`    | `thumbv7em-none-eabihf` | `nRF52833_xxAA` |
+//! | feature | target                  | chip     |
+//! |---------|-------------------------|----------|
+//! | `v1`    | `thumbv6m-none-eabi`    | nRF51822 |
+//! | `v2`    | `thumbv7em-none-eabihf` | nRF52833 |
 //!
 //! With neither, which is how the host build and `cargo test` see it, the
 //! crate is only [`Image`], so firmware libraries can name frames without

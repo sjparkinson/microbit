@@ -13,7 +13,7 @@ Sources, in order of trust:
 2. tech.microbit.org: the revision pages under /hardware/, the schematic notes and V2 pinmap, the edge connector page, and /software/daplink-interface/. Name the revision page you read, since the four don't always agree.
 3. Nordic's product specifications for the nRF51822 and nRF52833 (docs.nordicsemi.com), for anything about the chip itself: peripherals, pin capabilities, UICR, errata. Cite the section and the spec version.
 4. The nrf-rs BSPs ([nrf-rs/microbit](https://github.com/nrf-rs/microbit), `microbit-common/src/v1` and `v2`), which `board` is built on, and nrf-hal. Pin links to a commit hash. They're working code, so a pin they use is good evidence, but they can carry a mistake the schematic doesn't.
-5. probe-rs's target files and issues, and DAPLink's source, for flashing and the interface chip.
+5. DAPLink's source and the Foundation's [microbit-universal-hex](https://github.com/microbit-foundation/microbit-universal-hex), for flashing, board IDs and the interface chip.
 6. microbit.org's user guide and support articles, forum posts and blog write-ups. Useful, but "likely" unless they cite one of the above.
 
 Rules:
