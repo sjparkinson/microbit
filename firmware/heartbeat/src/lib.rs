@@ -173,9 +173,17 @@ impl Heart {
         self.bpm = adjust(self.bpm, slower, faster);
 
         let frame = frame_at(self.phase_ms);
-        // The remainder carries into the next beat, so a period that isn't a
-        // whole number of ticks still averages out to the right rate.
-        self.phase_ms = (self.phase_ms + TICK_MS) % period_ms(self.bpm);
+        let period = period_ms(self.bpm);
+        self.phase_ms = if self.phase_ms >= period {
+            // Only after a speed-up: the phase is already past the new
+            // period's end, and wrapping it would land mid-beat.
+            0
+        } else {
+            // The remainder carries into the next beat, so a period that
+            // isn't a whole number of ticks still averages out to the right
+            // rate.
+            (self.phase_ms + TICK_MS) % period
+        };
         frame
     }
 }
@@ -389,17 +397,27 @@ mod tests {
     }
 
     #[test]
-    fn a_shorter_period_wraps_the_phase() {
+    fn a_shorter_period_behind_the_phase_starts_a_new_beat() {
         let mut heart = Heart::new();
-        // Most of the way through a 70 bpm beat (857 ms), then up to 150
-        // (400 ms).
-        idle(&mut heart, 60);
-        assert_eq!(heart.phase_ms(), 600);
-        for _ in 0..8 {
-            press(&mut heart, false, true);
+        // 1300 ms into a 40 bpm beat (1500 ms), then up to 50 (1200 ms),
+        // which ends before where the beat already is.
+        for _ in 0..3 {
+            press(&mut heart, true, false);
         }
-        assert_eq!(heart.bpm(), MAX_BPM);
-        assert!(heart.phase_ms() < period_ms(MAX_BPM));
+        assert_eq!(heart.bpm(), MIN_BPM);
+        while heart.phase_ms() != 0 {
+            heart.tick(false, false);
+        }
+        idle(&mut heart, 130);
+        assert_eq!(heart.phase_ms(), 1300);
+        // The press lands on its second tick, which still shows the rest.
+        assert_eq!(heart.tick(false, true), &SMALL);
+        assert_eq!(heart.tick(false, true), &SMALL);
+        assert_eq!(heart.bpm(), 50);
+        // Wrapping 1320 into 1200 would give 120, on the small frame
+        // between the pulses. It starts the beat over instead.
+        assert_eq!(heart.phase_ms(), 0);
+        assert_eq!(heart.tick(false, false), &BIG);
     }
 
     #[test]
