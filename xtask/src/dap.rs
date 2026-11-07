@@ -17,7 +17,6 @@ const CONNECT: u8 = 0x02;
 const DISCONNECT: u8 = 0x03;
 const TRANSFER_CONFIGURE: u8 = 0x04;
 const TRANSFER: u8 = 0x05;
-const TRANSFER_BLOCK: u8 = 0x06;
 const SWJ_CLOCK: u8 = 0x11;
 const SWJ_SEQUENCE: u8 = 0x12;
 const SWD_CONFIGURE: u8 = 0x13;
@@ -39,7 +38,7 @@ const RESP_PROTOCOL_ERROR: u8 = 0x08;
 const RESP_MISMATCH: u8 = 0x10;
 
 /// DP registers.
-pub const DP_IDCODE: u8 = 0x0;
+const DP_IDCODE: u8 = 0x0;
 const DP_ABORT: u8 = 0x0;
 const DP_CTRL_STAT: u8 = 0x4;
 const DP_SELECT: u8 = 0x8;
@@ -143,7 +142,7 @@ impl<L: Link> Dap<L> {
         }
     }
 
-    pub fn info(&mut self, id: u8) -> Result<Vec<u8>, String> {
+    fn info(&mut self, id: u8) -> Result<Vec<u8>, String> {
         let response = self.command(&[INFO, id])?;
         let len = usize::from(*response.get(1).ok_or("a DAP_Info with no length")?);
         response
@@ -247,11 +246,11 @@ impl<L: Link> Dap<L> {
         }
     }
 
-    pub fn read_dp(&mut self, reg: u8) -> Result<u32, String> {
+    fn read_dp(&mut self, reg: u8) -> Result<u32, String> {
         Ok(self.transfer(&[Op::read(reg)])?[0])
     }
 
-    pub fn write_dp(&mut self, reg: u8, value: u32) -> Result<(), String> {
+    fn write_dp(&mut self, reg: u8, value: u32) -> Result<(), String> {
         self.transfer(&[Op::write(reg, value)]).map(drop)
     }
 
@@ -312,76 +311,60 @@ impl<L: Link> Dap<L> {
     /// says it's finished. Packs as many as fit into each packet.
     pub fn write_each_and_wait(&mut self, writes: &[(u32, u32)], ready: u32) -> Result<(), String> {
         self.set_csw(false)?;
-        // Every AP register used here is in bank 0.
-        let select: Vec<Op> = self.select(MEM_AP, AP_TAR).into_iter().collect();
         let tar = REQ_AP | AP_TAR;
         let drw = REQ_AP | AP_DRW;
-        let per_write = [
-            Op::write(tar, 0),
-            Op::write(drw, 0),
-            Op::write(tar, ready),
-            Op::write(drw | REQ_READ | REQ_MATCH, 1),
-        ];
-        let mask = Op::write(REQ_MATCH_MASK, 1);
-        let fixed = 3 + select.iter().map(Op::len).sum::<usize>() + mask.len();
-        let each = per_write.iter().map(Op::len).sum::<usize>();
-        let per_packet = (self.packet - fixed) / each;
+        let per_write = |address, value| {
+            [
+                Op::write(tar, address),
+                Op::write(drw, value),
+                Op::write(tar, ready),
+                Op::write(drw | REQ_READ | REQ_MATCH, 1),
+            ]
+        };
+        let each: usize = per_write(0, 0).iter().map(Op::len).sum();
 
-        let mut first = true;
-        for chunk in writes.chunks(per_packet.max(1)) {
-            let mut ops = Vec::new();
-            if first {
-                ops.extend(&select);
-                first = false;
-            }
-            ops.push(mask);
+        // The probe keeps the match mask, and SELECT, between transfers, so
+        // only the first packet carries them. Every AP register used here is
+        // in bank 0.
+        let mut first: Vec<Op> = self.select(MEM_AP, AP_TAR).into_iter().collect();
+        first.push(Op::write(REQ_MATCH_MASK, 1));
+        let mut rest = writes;
+        while !rest.is_empty() {
+            let mut ops = std::mem::take(&mut first);
+            let room = self.packet - 3 - ops.iter().map(Op::len).sum::<usize>();
+            let (chunk, after) = rest.split_at((room / each).clamp(1, rest.len()));
             for &(address, value) in chunk {
-                ops.extend([
-                    Op::write(tar, address),
-                    Op::write(drw, value),
-                    Op::write(tar, ready),
-                    Op::write(drw | REQ_READ | REQ_MATCH, 1),
-                ]);
+                ops.extend(per_write(address, value));
             }
             self.transfer(&ops)?;
+            rest = after;
         }
         Ok(())
     }
 
-    /// Reads `count` words from `address` up, with DAP_TransferBlock.
+    /// Waits, in the probe, for `ap`'s register `reg` to read `value` under
+    /// `mask`, retrying as often as TRANSFER_CONFIGURE allows.
+    pub fn wait_ap(&mut self, ap: u8, reg: u8, mask: u32, value: u32) -> Result<(), String> {
+        let mut ops = vec![Op::write(REQ_MATCH_MASK, mask)];
+        ops.extend(self.ap_ops(ap, reg, Op::write(REQ_READ | REQ_MATCH, value)));
+        self.transfer(&ops).map(drop)
+    }
+
+    /// Reads `count` words from `address` up: a TAR write and as many DRW
+    /// reads as the response has room for, in each DAP_Transfer.
     pub fn read_block(&mut self, address: u32, count: usize) -> Result<Vec<u32>, String> {
         self.set_csw(true)?;
-        let per_packet = (self.packet - 4) / 4;
+        let per_packet = (self.packet - 3) / 4;
         let mut words = Vec::with_capacity(count);
         while words.len() < count {
             let at = address + 4 * u32::try_from(words.len()).expect("fits");
             let to_wrap = (INCREMENT_WRAP - at % INCREMENT_WRAP) / 4;
             let n = (count - words.len()).min(per_packet).min(to_wrap as usize);
-            let tar = self.ap_ops(MEM_AP, AP_TAR, Op::write(0, at));
-            self.transfer(&tar)?;
-            let mut command = vec![TRANSFER_BLOCK, 0];
-            command.extend(u16::try_from(n).expect("small").to_le_bytes());
-            command.push(REQ_AP | REQ_READ | AP_DRW);
-            let response = self.command(&command)?;
-            let (done, ack) = match response[..] {
-                [_, lo, hi, ack, ..] => (usize::from(u16::from_le_bytes([lo, hi])), ack),
-                _ => return Err("a DAP_TransferBlock response with no status".into()),
-            };
-            if done != n || ack != ACK_OK {
-                return Err(describe(ack, done, n));
+            let mut ops = self.ap_ops(MEM_AP, AP_TAR, Op::write(0, at));
+            for _ in 0..n {
+                ops.extend(self.ap_ops(MEM_AP, AP_DRW, Op::read(0)));
             }
-            let before = words.len();
-            words.extend(
-                response[4..]
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .take(n)
-                    .map(|&w| u32::from_le_bytes(w)),
-            );
-            if words.len() - before != n {
-                return Err("a DAP_TransferBlock response shorter than its reads".into());
-            }
+            words.extend(self.transfer(&ops)?);
         }
         Ok(words)
     }

@@ -15,7 +15,7 @@ pub struct Elf {
 
 /// A loadable piece of the image at its load (physical) address. For .data
 /// that's its initial values in flash, not where cortex-m-rt copies it to.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     pub address: u32,
     pub data: Vec<u8>,
@@ -78,12 +78,17 @@ impl Elf {
         &self.segments
     }
 
-    /// Bytes programmed into `flash`: .vector_table, .text, .rodata and
-    /// .data's initial values. Anything outside it (UICR, say) isn't counted.
-    pub fn flash_bytes(&self, flash: &Range<u32>) -> u32 {
+    /// The segments that start in `flash`: .vector_table, .text, .rodata and
+    /// .data's initial values. Anything outside it (UICR, say) is left out.
+    pub fn flash_segments(&self, flash: &Range<u32>) -> impl Iterator<Item = &Segment> {
         self.segments
             .iter()
-            .filter(|s| flash.contains(&s.address))
+            .filter(move |s| flash.contains(&s.address))
+    }
+
+    /// Bytes programmed into `flash`.
+    pub fn flash_bytes(&self, flash: &Range<u32>) -> u32 {
+        self.flash_segments(flash)
             .map(|s| s.data.len() as u32)
             .sum()
     }

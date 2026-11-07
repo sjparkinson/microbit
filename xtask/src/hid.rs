@@ -13,7 +13,7 @@ pub const PRODUCT: u16 = 0x0204;
 const REPORT: usize = 64;
 
 /// A micro:bit on USB, by its serial number, which starts with the board ID.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Probe {
     pub serial: String,
     #[cfg(target_os = "linux")]
@@ -37,24 +37,33 @@ pub use macos::{Hid, list};
 pub use linux::{Hid, list};
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn list() -> Result<Vec<Probe>, String> {
-    Err("flashing over USB only works on macOS and Linux; try --drive".into())
-}
+pub use other::{Hid, list};
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub struct Hid;
+mod other {
+    //! Anywhere else: no USB, so `--drive` is the way.
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-impl Hid {
-    pub fn open(_: &Probe) -> Result<Self, String> {
-        Err("flashing over USB only works on macOS and Linux; try --drive".into())
+    use super::Probe;
+
+    const UNSUPPORTED: &str = "flashing over USB only works on macOS and Linux; try --drive";
+
+    pub fn list() -> Result<Vec<Probe>, String> {
+        Err(UNSUPPORTED.into())
     }
-}
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-impl crate::dap::Link for Hid {
-    fn exchange(&mut self, _: &[u8]) -> Result<Vec<u8>, String> {
-        unreachable!()
+    /// Can't be made, since `list` never finds anything to open.
+    pub enum Hid {}
+
+    impl Hid {
+        pub fn open(_: &Probe) -> Result<Self, String> {
+            Err(UNSUPPORTED.into())
+        }
+    }
+
+    impl crate::dap::Link for Hid {
+        fn exchange(&mut self, _: &[u8]) -> Result<Vec<u8>, String> {
+            match *self {}
+        }
     }
 }
 
@@ -235,8 +244,19 @@ mod macos {
         }
     }
 
-    /// The micro:bits IOKit can see, each with a retained device reference.
-    fn devices() -> Result<Vec<(String, CFTypeRef)>, String> {
+    /// A CoreFoundation reference this code owns, released on drop.
+    struct Retained(CFTypeRef);
+
+    impl Drop for Retained {
+        fn drop(&mut self) {
+            // SAFETY: only built from a reference this code retained, and
+            // released once, here.
+            unsafe { CFRelease(self.0) };
+        }
+    }
+
+    /// The micro:bits IOKit can see, by serial number.
+    fn devices() -> Result<Vec<(String, Retained)>, String> {
         // SAFETY: plain CoreFoundation and IOKit calls on objects this
         // function creates, each checked for null before use. The manager
         // and the set are released here; the devices in it are retained
@@ -292,7 +312,7 @@ mod macos {
                     } else {
                         String::new()
                     };
-                    found.push((text, CFRetain(device)));
+                    found.push((text, Retained(CFRetain(device))));
                 }
                 CFRelease(key);
                 CFRelease(set);
@@ -304,18 +324,10 @@ mod macos {
     }
 
     pub fn list() -> Result<Vec<Probe>, String> {
-        let devices = devices()?;
-        let probes = devices
-            .iter()
-            .map(|(serial, _)| Probe {
-                serial: serial.clone(),
-            })
-            .collect();
-        for (_, device) in devices {
-            // SAFETY: retained in `devices`, and not used again.
-            unsafe { CFRelease(device) };
-        }
-        Ok(probes)
+        Ok(devices()?
+            .into_iter()
+            .map(|(serial, _)| Probe { serial })
+            .collect())
     }
 
     /// What the input report callback writes into. Boxed, so its address
@@ -349,23 +361,18 @@ mod macos {
     }
 
     pub struct Hid {
-        device: CFTypeRef,
+        // Dropped after Hid's own Drop has closed it.
+        device: Retained,
         run_loop: CFTypeRef,
         inbox: Box<Inbox>,
     }
 
     impl Hid {
         pub fn open(probe: &Probe) -> Result<Self, String> {
-            let mut devices = devices()?;
-            let index = devices
-                .iter()
-                .position(|(serial, _)| *serial == probe.serial)
+            let (_, device) = devices()?
+                .into_iter()
+                .find(|(serial, _)| *serial == probe.serial)
                 .ok_or_else(|| format!("the micro:bit {} has gone", probe.serial))?;
-            let (_, device) = devices.remove(index);
-            for (_, other) in devices {
-                // SAFETY: retained in `devices`, and not used again.
-                unsafe { CFRelease(other) };
-            }
             let mut inbox = Box::new(Inbox {
                 buffer: [0; REPORT],
                 reports: VecDeque::new(),
@@ -374,18 +381,17 @@ mod macos {
             // buffer and context both point into `inbox`, which the Hid
             // keeps alive and unregisters in Drop before freeing.
             unsafe {
-                let opened = IOHIDDeviceOpen(device, 0);
+                let opened = IOHIDDeviceOpen(device.0, 0);
                 if opened != K_IORETURN_SUCCESS {
-                    CFRelease(device);
                     return Err(format!(
                         "macOS wouldn't open the micro:bit's HID interface (IOReturn {opened:#x})"
                     ));
                 }
                 let run_loop = CFRunLoopGetCurrent();
-                IOHIDDeviceScheduleWithRunLoop(device, run_loop, kCFRunLoopDefaultMode);
+                IOHIDDeviceScheduleWithRunLoop(device.0, run_loop, kCFRunLoopDefaultMode);
                 let context = (&raw mut *inbox).cast::<c_void>();
                 IOHIDDeviceRegisterInputReportCallback(
-                    device,
+                    device.0,
                     inbox.buffer.as_mut_ptr(),
                     REPORT as CFIndex,
                     Some(received),
@@ -420,7 +426,7 @@ mod macos {
             // call.
             let sent = unsafe {
                 IOHIDDeviceSetReport(
-                    self.device,
+                    self.device.0,
                     K_IOHID_REPORT_TYPE_OUTPUT,
                     0,
                     report.as_ptr(),
@@ -432,28 +438,31 @@ mod macos {
                     "sending to the micro:bit failed (IOReturn {sent:#x})"
                 ));
             }
-            self.pump(Duration::from_secs(5));
-            self.inbox
-                .reports
-                .pop_front()
-                .ok_or_else(|| "the micro:bit didn't answer within 5 s".into())
+            self.pump(TIMEOUT);
+            self.inbox.reports.pop_front().ok_or_else(|| {
+                format!("the micro:bit didn't answer within {} s", TIMEOUT.as_secs())
+            })
         }
     }
 
+    /// How long to wait for the probe to answer one command.
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
     impl Drop for Hid {
         fn drop(&mut self) {
+            let device = self.device.0;
             // SAFETY: undoes what open did, in reverse, on the same device.
+            // `self.device` releases it once this returns.
             unsafe {
                 IOHIDDeviceRegisterInputReportCallback(
-                    self.device,
+                    device,
                     self.inbox.buffer.as_mut_ptr(),
                     REPORT as CFIndex,
                     None,
                     std::ptr::null_mut(),
                 );
-                IOHIDDeviceUnscheduleFromRunLoop(self.device, self.run_loop, kCFRunLoopDefaultMode);
-                IOHIDDeviceClose(self.device, 0);
-                CFRelease(self.device);
+                IOHIDDeviceUnscheduleFromRunLoop(device, self.run_loop, kCFRunLoopDefaultMode);
+                IOHIDDeviceClose(device, 0);
             }
         }
     }

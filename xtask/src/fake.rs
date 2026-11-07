@@ -17,7 +17,7 @@ pub struct Fake {
     nrf52: bool,
     locked: bool,
     /// A flash word that ignores writes, to check the verify.
-    pub stuck_bit: Option<u32>,
+    pub stuck_word: Option<u32>,
     pub running: bool,
     powered: bool,
     sticky: bool,
@@ -52,7 +52,7 @@ impl Fake {
             page,
             nrf52,
             locked,
-            stuck_bit: None,
+            stuck_word: None,
             running: true,
             powered: false,
             sticky: false,
@@ -90,8 +90,11 @@ impl Fake {
         let a = address as usize;
         match address {
             _ if a + 4 <= self.flash.len() && address.is_multiple_of(4) => {
-                if self.config != 1 || Some(address) == self.stuck_bit {
-                    return if self.config == 1 { Some(()) } else { None };
+                if self.config != 1 {
+                    return None;
+                }
+                if Some(address) == self.stuck_word {
+                    return Some(());
                 }
                 for (i, byte) in value.to_le_bytes().into_iter().enumerate() {
                     self.flash[a + i] &= byte;
@@ -262,30 +265,6 @@ impl Fake {
         response.extend(reads);
         response
     }
-
-    fn transfer_block(&mut self, command: &[u8]) -> Vec<u8> {
-        let count = u16::from_le_bytes([command[2], command[3]]);
-        let request = command[4];
-        let mut done = 0u16;
-        let mut ack = OK;
-        let mut reads = Vec::new();
-        for _ in 0..count {
-            match self.access(request, 0) {
-                Some(value) => reads.extend(value.to_le_bytes()),
-                None => {
-                    self.sticky = true;
-                    ack = FAULT;
-                    break;
-                }
-            }
-            done += 1;
-        }
-        let mut response = vec![0x06];
-        response.extend(done.to_le_bytes());
-        response.push(ack);
-        response.extend(reads);
-        response
-    }
 }
 
 impl crate::dap::Link for Fake {
@@ -293,18 +272,11 @@ impl crate::dap::Link for Fake {
         assert!(command.len() <= 64, "a command bigger than a HID report");
         let response = match command[0] {
             0x00 => match command[1] {
-                0x03 => {
-                    let serial = b"9901000052374e45";
-                    let mut r = vec![0x00, serial.len() as u8];
-                    r.extend(serial);
-                    r
-                }
                 0xFF => vec![0x00, 2, 64, 0],
                 _ => vec![0x00, 0],
             },
             0x02 => vec![0x02, 1],
             0x05 => self.transfer(command),
-            0x06 => self.transfer_block(command),
             0x03 | 0x04 | 0x11 | 0x12 | 0x13 => vec![command[0], 0],
             other => panic!("the fake doesn't know command {other:#04x}"),
         };

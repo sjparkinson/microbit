@@ -35,9 +35,9 @@ const SPACE: Glyph = Glyph {
 };
 
 /// The letters `MESSAGE` uses, or `None`.
-const fn lookup(c: char) -> Option<Glyph> {
+fn lookup(c: char) -> Option<Glyph> {
     let (width, rows) = match c {
-        ' ' => return Some(SPACE),
+        ' ' => (SPACE.width, SPACE.rows),
         'H' => (4, [0b1001, 0b1001, 0b1111, 0b1001, 0b1001]),
         'E' => (4, [0b1111, 0b1000, 0b1110, 0b1000, 0b1111]),
         'L' => (4, [0b1000, 0b1000, 0b1000, 0b1000, 0b1111]),
@@ -52,16 +52,8 @@ const fn lookup(c: char) -> Option<Glyph> {
 }
 
 /// `c`'s glyph. Anything without one shows as a space.
-const fn glyph(c: char) -> Glyph {
-    match lookup(c) {
-        Some(glyph) => glyph,
-        None => SPACE,
-    }
-}
-
-/// Whether `c` has a glyph of its own.
-pub const fn known(c: char) -> bool {
-    lookup(c).is_some()
+fn glyph(c: char) -> Glyph {
+    lookup(c).unwrap_or(SPACE)
 }
 
 /// The strip's length in columns: every glyph plus its gap, and both
@@ -143,9 +135,9 @@ mod tests {
     #[test]
     fn every_letter_in_the_message_has_a_glyph() {
         for c in MESSAGE.chars() {
-            assert!(known(c), "no glyph for {c:?}");
+            assert!(lookup(c).is_some(), "no glyph for {c:?}");
         }
-        assert!(!known('Z'));
+        assert!(lookup('Z').is_none());
     }
 
     #[test]

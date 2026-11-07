@@ -189,7 +189,7 @@ fn parse(args: &[&str]) -> Result<Task, String> {
     let mut all = false;
     let mut board = None;
     let mut all_boards = false;
-    let mut drive = None;
+    let mut via = None;
 
     let mut rest = rest.iter();
     while let Some(&arg) = rest.next() {
@@ -203,9 +203,9 @@ fn parse(args: &[&str]) -> Result<Task, String> {
             _ if arg.starts_with("--board=") => {
                 board = Some(Board::parse(&arg["--board=".len()..])?);
             }
-            "--drive" => drive = Some(Via::Drive(None)),
+            "--drive" => via = Some(Via::Drive(None)),
             _ if arg.starts_with("--drive=") => {
-                drive = Some(Via::Drive(Some(PathBuf::from(&arg["--drive=".len()..]))));
+                via = Some(Via::Drive(Some(PathBuf::from(&arg["--drive=".len()..]))));
             }
             "-h" | "--help" => return Err(String::new()),
             _ if arg.starts_with('-') => return Err(format!("unknown option {arg}")),
@@ -220,7 +220,7 @@ fn parse(args: &[&str]) -> Result<Task, String> {
     if name.is_some() && all {
         return Err("give a firmware name or --all, not both".into());
     }
-    if drive.is_some() && *command != "flash" {
+    if via.is_some() && *command != "flash" {
         return Err("only flash takes --drive".into());
     }
     let no_options = name.is_none() && !all && board.is_none() && !all_boards;
@@ -240,7 +240,7 @@ fn parse(args: &[&str]) -> Result<Task, String> {
             Some(name) => Ok(Task::Flash(
                 name,
                 board.unwrap_or(Board::V2),
-                drive.unwrap_or(Via::Debug),
+                via.unwrap_or(Via::Debug),
             )),
             None => Err("flash needs a firmware name; `cargo xtask list` shows them".into()),
         },
@@ -341,8 +341,8 @@ struct Image {
     flash: u32,
     ram: u32,
     hex: PathBuf,
-    /// What goes into flash: each loadable segment's address and bytes.
-    segments: Vec<(u32, Vec<u8>)>,
+    /// What goes into flash.
+    segments: Vec<elf::Segment>,
 }
 
 /// Builds `names` for each of `boards`, one cargo run per board, then sizes
@@ -393,12 +393,7 @@ fn package(name: &str, board: Board) -> Result<Image, String> {
         flash: elf.flash_bytes(&board.flash()),
         ram: elf.ram_bytes(&board.ram()),
         hex,
-        segments: elf
-            .segments()
-            .iter()
-            .filter(|s| board.flash().contains(&s.address))
-            .map(|s| (s.address, s.data.clone()))
-            .collect(),
+        segments: elf.flash_segments(&board.flash()).cloned().collect(),
     })
 }
 
@@ -444,12 +439,9 @@ fn flash(name: &str, board: Board) -> Result<(), String> {
     let probe = match &probes[..] {
         [probe] => probe.clone(),
         [] => {
-            return Err(match find_drive("MAINTENANCE") {
-                Some(_) => "the micro:bit's in MAINTENANCE mode, so the reset button was held \
-                     as it powered up; unplug it and plug it back in without touching the button"
-                    .into(),
-                None => "there's no micro:bit on USB; plug one in with a data cable".into(),
-            });
+            return Err(maintenance()
+                .unwrap_or("there's no micro:bit on USB; plug one in with a data cable")
+                .into());
         }
         _ => {
             let serials: Vec<&str> = probes.iter().map(|p| p.serial.as_str()).collect();
@@ -459,22 +451,11 @@ fn flash(name: &str, board: Board) -> Result<(), String> {
             ));
         }
     };
-    match Board::from_unique_id(&probe.serial) {
-        Some(found) if found != board => {
-            return Err(format!(
-                "the micro:bit plugged in ({}) is a {}, not a {}; pass --board {}",
-                probe.serial,
-                found.name(),
-                board.name(),
-                found.name()
-            ));
-        }
-        Some(_) => {}
-        None => eprintln!(
-            "warning: I don't know the board ID in {}, so I'll go by the chip alone",
-            probe.serial
-        ),
-    }
+    check_board(
+        Board::from_unique_id(&probe.serial),
+        board,
+        &format!("the micro:bit plugged in ({})", probe.serial),
+    )?;
 
     let image = build(&[name.to_string()], &[board])?.remove(0);
     let mut dap = dap::Dap::new(hid::Hid::open(&probe)?);
@@ -499,17 +480,12 @@ fn copy(name: &str, board: Board, drive: Option<PathBuf>) -> Result<(), String> 
     let drive = match drive {
         Some(drive) => drive,
         None => find_drive("MICROBIT").ok_or_else(|| {
-            let hint = match find_drive("MAINTENANCE") {
-                Some(_) => {
-                    "there's a MAINTENANCE drive instead, so the reset button was held as it \
-                     powered up; unplug it and plug it back in without touching the button"
-                }
-                None => {
-                    "plug the micro:bit in with a data cable, or pass --drive if it's mounted \
-                     somewhere else"
-                }
-            };
-            format!("couldn't find the MICROBIT drive: {hint}")
+            maintenance()
+                .unwrap_or(
+                    "couldn't find the MICROBIT drive; plug the micro:bit in with a data \
+                     cable, or pass --drive=<path> if it's mounted somewhere else",
+                )
+                .to_string()
         })?,
     };
     let details = drive.join("DETAILS.TXT");
@@ -520,23 +496,11 @@ fn copy(name: &str, board: Board, drive: Option<PathBuf>) -> Result<(), String> 
             drive.display()
         )
     })?;
-    match Board::from_details(&text) {
-        Some(found) if found != board => {
-            return Err(format!(
-                "{} is a {}, not a {}; pass --board {}",
-                drive.display(),
-                found.name(),
-                board.name(),
-                found.name()
-            ));
-        }
-        Some(_) => {}
-        None => eprintln!(
-            "warning: {} doesn't say which micro:bit it is, so I can't check it's a {}",
-            details.display(),
-            board.name()
-        ),
-    }
+    check_board(
+        Board::from_details(&text),
+        board,
+        &drive.display().to_string(),
+    )?;
 
     let image = build(&[name.to_string()], &[board])?.remove(0);
     let file = image.hex.file_name().expect("the hex has a file name");
@@ -558,6 +522,36 @@ fn copy(name: &str, board: Board, drive: Option<PathBuf>) -> Result<(), String> 
         to.display()
     );
     Ok(())
+}
+
+/// Stops if `found` (from a serial number or DETAILS.TXT, describing `what`)
+/// is the other board, and warns if it's unknown: the flasher also checks
+/// the chip itself.
+fn check_board(found: Option<Board>, board: Board, what: &str) -> Result<(), String> {
+    match found {
+        Some(found) if found != board => Err(format!(
+            "{what} is a {}, not a {}; pass --board {}",
+            found.name(),
+            board.name(),
+            found.name()
+        )),
+        Some(_) => Ok(()),
+        None => {
+            eprintln!(
+                "warning: {what} doesn't say which micro:bit it is, so I can't check it's a {}",
+                board.name()
+            );
+            Ok(())
+        }
+    }
+}
+
+/// What to say when the micro:bit came up as a MAINTENANCE drive.
+fn maintenance() -> Option<&'static str> {
+    find_drive("MAINTENANCE").map(|_| {
+        "the micro:bit's in MAINTENANCE mode, so the reset button was held as it powered up; \
+         unplug it and plug it back in without touching the button"
+    })
 }
 
 /// Where macOS and the usual Linux desktops mount a drive called `label`.

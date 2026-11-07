@@ -8,10 +8,8 @@
 #[cfg(target_os = "none")]
 use panic_halt as _;
 
-// `#[entry]` expands to an `unsafe extern "C"` trampoline that the reset
-// handler calls; there's no `unsafe` in the body.
+// cortex-m-rt's reset handler calls this once memory's set up.
 #[cfg(target_os = "none")]
-#[allow(unsafe_code)]
 #[cortex_m_rt::entry]
 fn main() -> ! {
     use hello::{MESSAGE, STEP_MS, frames};

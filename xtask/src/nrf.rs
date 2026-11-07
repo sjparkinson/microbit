@@ -9,6 +9,7 @@
 //! (nRF52833 PS §5.1 "CTRL-AP").
 
 use crate::dap::{Dap, Link};
+use crate::elf::Segment;
 
 const NVMC_READY: u32 = 0x4001_E400;
 const NVMC_CONFIG: u32 = 0x4001_E504;
@@ -56,12 +57,12 @@ pub enum Chip {
     Nrf52,
 }
 
-/// Programs `segments` (address and bytes, all in flash) and leaves the chip
-/// running them. `log` gets a line for each step.
+/// Programs `segments` and leaves the chip running them. Anything outside
+/// flash is refused. `log` gets a line for each step.
 pub fn program<L: Link>(
     dap: &mut Dap<L>,
     chip: Chip,
-    segments: &[(u32, Vec<u8>)],
+    segments: &[Segment],
     log: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     if chip == Chip::Nrf52 {
@@ -111,27 +112,31 @@ pub fn program<L: Link>(
         page
     ));
 
+    // Sorted, so the last word is the highest.
     let words = words(segments);
-    if let Some(&(address, _)) = words.iter().find(|&&(address, _)| address >= size) {
+    if let Some(&(address, _)) = words.last().filter(|&&(address, _)| address >= size) {
         return Err(format!(
             "the image reaches {address:#x}, past the end of flash"
         ));
     }
 
-    let mut erase: Vec<u32> = words
-        .iter()
-        .map(|&(address, _)| address & !(page - 1))
-        .collect();
-    erase.dedup();
-    log(&format!("erasing {} pages", erase.len()));
-    nvmc(dap, CONFIG_ERASE)?;
-    let erases: Vec<(u32, u32)> = erase.iter().map(|&p| (NVMC_ERASEPAGE, p)).collect();
+    // The NVMC CONFIG writes ride along in the same packets as the erases
+    // and writes they're for.
+    let mut erases = vec![(NVMC_CONFIG, CONFIG_ERASE)];
+    erases.extend(
+        words
+            .iter()
+            .map(|&(address, _)| (NVMC_ERASEPAGE, address & !(page - 1))),
+    );
+    erases.dedup();
+    log(&format!("erasing {} pages", erases.len() - 1));
     dap.write_each_and_wait(&erases, NVMC_READY)?;
 
     log(&format!("writing {} bytes", 4 * words.len()));
-    nvmc(dap, CONFIG_WRITE)?;
-    dap.write_each_and_wait(&words, NVMC_READY)?;
-    nvmc(dap, CONFIG_READ)?;
+    let mut writes = vec![(NVMC_CONFIG, CONFIG_WRITE)];
+    writes.extend(&words);
+    writes.push((NVMC_CONFIG, CONFIG_READ));
+    dap.write_each_and_wait(&writes, NVMC_READY)?;
 
     log("verifying");
     verify(dap, &words)?;
@@ -156,16 +161,9 @@ fn unlock<L: Link>(dap: &mut Dap<L>, log: &mut dyn FnMut(&str)) -> Result<(), St
     }
     log("access port protection is on, so erasing the whole chip through the CTRL-AP");
     dap.write_ap(CTRL_AP, CTRL_AP_ERASEALL, 1)?;
-    let mut erased = false;
-    for _ in 0..10_000 {
-        if dap.read_ap(CTRL_AP, CTRL_AP_ERASEALLSTATUS)? == 0 {
-            erased = true;
-            break;
-        }
-    }
-    if !erased {
-        return Err("the CTRL-AP erase never finished".into());
-    }
+    // ERASEALLSTATUS reads 0 once it's done; the probe polls for it.
+    dap.wait_ap(CTRL_AP, CTRL_AP_ERASEALLSTATUS, 1, 0)
+        .map_err(|e| format!("the CTRL-AP erase never finished: {e}"))?;
     dap.write_ap(CTRL_AP, CTRL_AP_RESET, 1)?;
     dap.write_ap(CTRL_AP, CTRL_AP_RESET, 0)?;
     dap.write_ap(CTRL_AP, CTRL_AP_ERASEALL, 0)?;
@@ -199,27 +197,17 @@ fn wait_halted<L: Link>(dap: &mut Dap<L>) -> Result<(), String> {
     Err("the core wouldn't halt".into())
 }
 
-fn nvmc<L: Link>(dap: &mut Dap<L>, config: u32) -> Result<(), String> {
-    dap.write_each_and_wait(&[(NVMC_CONFIG, config)], NVMC_READY)
-}
-
 fn verify<L: Link>(dap: &mut Dap<L>, words: &[(u32, u32)]) -> Result<(), String> {
     // Contiguous runs, so each is one block read.
-    let mut start = 0;
-    while start < words.len() {
-        let mut end = start + 1;
-        while end < words.len() && words[end].0 == words[end - 1].0 + 4 {
-            end += 1;
-        }
-        let read = dap.read_block(words[start].0, end - start)?;
-        for (&(address, want), got) in words[start..end].iter().zip(read) {
+    for run in words.chunk_by(|a, b| b.0 == a.0 + 4) {
+        let read = dap.read_block(run[0].0, run.len())?;
+        for (&(address, want), got) in run.iter().zip(read) {
             if got != want {
                 return Err(format!(
                     "flash at {address:#010x} reads {got:#010x} after writing {want:#010x}"
                 ));
             }
         }
-        start = end;
     }
     Ok(())
 }
@@ -234,9 +222,9 @@ fn run<L: Link>(dap: &mut Dap<L>) -> Result<(), String> {
 
 /// The segments as sorted, word-aligned `(address, word)` pairs, padding
 /// with 0xFF (erased flash) where a segment starts or ends mid-word.
-fn words(segments: &[(u32, Vec<u8>)]) -> Vec<(u32, u32)> {
+fn words(segments: &[Segment]) -> Vec<(u32, u32)> {
     let mut bytes = std::collections::BTreeMap::new();
-    for (address, data) in segments {
+    for Segment { address, data } in segments {
         for (i, &byte) in data.iter().enumerate() {
             bytes.insert(address + u32::try_from(i).expect("fits"), byte);
         }
@@ -260,30 +248,39 @@ mod tests {
     use super::*;
     use crate::fake::Fake;
 
-    fn image() -> Vec<(u32, Vec<u8>)> {
+    fn segment(address: u32, data: Vec<u8>) -> Segment {
+        Segment { address, data }
+    }
+
+    fn image() -> Vec<Segment> {
         vec![
-            (0x0, (0..=255u8).cycle().take(3000).collect()),
-            (0x2000, vec![0xAA, 0xBB, 0xCC]),
+            segment(0x0, (0..=255u8).cycle().take(3000).collect()),
+            segment(0x2000, vec![0xAA, 0xBB, 0xCC]),
         ]
+    }
+
+    fn connected(fake: Fake) -> Dap<Fake> {
+        let mut dap = Dap::new(fake);
+        dap.connect(1_000_000).unwrap();
+        dap
     }
 
     #[test]
     fn words_are_aligned_and_padded_with_erased_bytes() {
-        let words = words(&[(0x101, vec![0x11, 0x22]), (0x108, vec![0x33])]);
+        let words = words(&[segment(0x101, vec![0x11, 0x22]), segment(0x108, vec![0x33])]);
         assert_eq!(words, [(0x100, 0xFF22_11FF), (0x108, 0xFFFF_FF33)]);
     }
 
     #[test]
     fn programs_a_v1_and_leaves_it_running() {
-        let mut dap = Dap::new(Fake::nrf51());
-        dap.connect(1_000_000).unwrap();
+        let mut dap = connected(Fake::nrf51());
         let mut lines = Vec::new();
         program(&mut dap, Chip::Nrf51, &image(), &mut |l| {
             lines.push(l.to_string())
         })
         .unwrap();
         let fake = dap.into_link();
-        assert_eq!(&fake.flash[..3000], &image()[0].1[..]);
+        assert_eq!(&fake.flash[..3000], &image()[0].data[..]);
         assert_eq!(&fake.flash[0x2000..0x2004], &[0xAA, 0xBB, 0xCC, 0xFF]);
         // Pages the image doesn't touch keep what they had.
         assert_eq!(fake.flash[0x1000], 0x5A);
@@ -293,18 +290,16 @@ mod tests {
 
     #[test]
     fn programs_a_v2() {
-        let mut dap = Dap::new(Fake::nrf52(false));
-        dap.connect(1_000_000).unwrap();
+        let mut dap = connected(Fake::nrf52(false));
         program(&mut dap, Chip::Nrf52, &image(), &mut |_| {}).unwrap();
         let fake = dap.into_link();
-        assert_eq!(&fake.flash[..3000], &image()[0].1[..]);
+        assert_eq!(&fake.flash[..3000], &image()[0].data[..]);
         assert!(fake.running);
     }
 
     #[test]
     fn erases_a_locked_v2_through_the_ctrl_ap() {
-        let mut dap = Dap::new(Fake::nrf52(true));
-        dap.connect(1_000_000).unwrap();
+        let mut dap = connected(Fake::nrf52(true));
         let mut lines = Vec::new();
         program(&mut dap, Chip::Nrf52, &image(), &mut |l| {
             lines.push(l.to_string())
@@ -319,8 +314,7 @@ mod tests {
 
     #[test]
     fn refuses_the_wrong_chip() {
-        let mut dap = Dap::new(Fake::nrf51());
-        dap.connect(1_000_000).unwrap();
+        let mut dap = connected(Fake::nrf51());
         let err = program(&mut dap, Chip::Nrf52, &image(), &mut |_| {}).unwrap_err();
         assert!(
             err.contains("CTRL-AP") || err.contains("not an nRF52"),
@@ -330,18 +324,22 @@ mod tests {
 
     #[test]
     fn refuses_an_image_past_the_end_of_flash() {
-        let mut dap = Dap::new(Fake::nrf51());
-        dap.connect(1_000_000).unwrap();
-        let err = program(&mut dap, Chip::Nrf51, &[(0x4_0000, vec![0])], &mut |_| {}).unwrap_err();
+        let mut dap = connected(Fake::nrf51());
+        let err = program(
+            &mut dap,
+            Chip::Nrf51,
+            &[segment(0x4_0000, vec![0])],
+            &mut |_| {},
+        )
+        .unwrap_err();
         assert!(err.contains("past the end"), "{err}");
     }
 
     #[test]
     fn catches_flash_that_doesnt_take_the_write() {
         let mut fake = Fake::nrf51();
-        fake.stuck_bit = Some(0x10);
-        let mut dap = Dap::new(fake);
-        dap.connect(1_000_000).unwrap();
+        fake.stuck_word = Some(0x10);
+        let mut dap = connected(fake);
         let err = program(&mut dap, Chip::Nrf51, &image(), &mut |_| {}).unwrap_err();
         assert!(err.contains("0x00000010"), "{err}");
     }
