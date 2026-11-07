@@ -213,8 +213,9 @@ fn verify<L: Link>(dap: &mut Dap<L>, words: &[(u32, u32)]) -> Result<(), String>
 }
 
 /// Lets go of the core and resets it, so the new firmware starts from
-/// scratch with the debugger out of the way.
-fn run<L: Link>(dap: &mut Dap<L>) -> Result<(), String> {
+/// scratch with the debugger out of the way. Also what flash() does after
+/// a failure, so the chip isn't left halted.
+pub fn run<L: Link>(dap: &mut Dap<L>) -> Result<(), String> {
     dap.write32(DHCSR, DBGKEY)?;
     let _ = dap.write32(AIRCR, VECTKEY_SYSRESETREQ);
     dap.clear_errors()

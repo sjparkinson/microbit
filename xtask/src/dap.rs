@@ -435,6 +435,29 @@ mod tests {
         assert!(!dap.into_link().powered);
     }
 
+    /// What flash() does when programming fails partway.
+    #[test]
+    fn a_failed_program_still_leaves_the_chip_running_and_let_go() {
+        let mut fake = Fake::nrf51();
+        fake.stuck_word = Some(0x10);
+        let mut dap = connected(fake);
+        let image = [crate::elf::Segment {
+            address: 0,
+            data: vec![0; 64],
+        }];
+        let chip = crate::nrf::Chip::Nrf51;
+        assert!(crate::nrf::program(&mut dap, chip, &image, &mut |_| {}).is_err());
+        // And a sticky error on top, which the release has to get past.
+        assert!(dap.read32(0x3000_0000).is_err());
+        assert!(!dap.link.running);
+
+        let _ = dap.clear_errors().and_then(|()| crate::nrf::run(&mut dap));
+        dap.disconnect().unwrap();
+        let fake = dap.into_link();
+        assert!(fake.running);
+        assert!(!fake.powered);
+    }
+
     #[test]
     fn disconnecting_after_a_fault_still_powers_down() {
         let mut dap = connected(Fake::nrf51());
