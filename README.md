@@ -46,9 +46,7 @@ cargo xtask flash heartbeat --board v1  # v1
 
 The interface chip on every micro:bit's USB port is a CMSIS-DAP debug probe, and `xtask` speaks that itself, with no probe-rs or OpenOCD. It halts the chip, erases the pages the firmware needs, writes it, reads every word back, and resets it. It checks the board ID in the USB serial number first, and the chip's CPU type once it's connected, so a v2 image never goes on a v1.
 
-`cargo xtask flash heartbeat --drive` copies the hex onto the MICROBIT drive instead, which is the same as dragging it there. That works too, but on macOS the v1's interface chip sometimes gives up on a copy ("The transfer timed out").
-
-[docs/flashing.md](docs/flashing.md) has how it works, the drive, updating the interface firmware and what to do when it won't connect.
+[docs/flashing.md](docs/flashing.md) has how it works, updating the interface firmware and what to do when it won't connect.
 
 ## Contributing
 
