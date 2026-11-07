@@ -194,7 +194,14 @@ impl<L: Link> Dap<L> {
         Err("the target's debug port never powered up".into())
     }
 
+    /// Drops the debug power-up requests, so the target can leave debug
+    /// interface mode, then lets go of SWD. The power-down is best-effort:
+    /// this also runs after something's gone wrong, when it may not take.
     pub fn disconnect(&mut self) -> Result<(), String> {
+        // A sticky error FAULTs the CTRL/STAT write, so clear them first.
+        let _ = self
+            .clear_errors()
+            .and_then(|()| self.write_dp(DP_CTRL_STAT, 0));
         self.status(&[DISCONNECT])
     }
 
@@ -418,5 +425,22 @@ mod tests {
         // The SELECT for AP 1 was in this transfer, which never ran.
         assert!(dap.read_ap(CTRL_AP, IDR).is_err());
         assert_eq!(dap.read_ap(CTRL_AP, IDR), Ok(0x0288_0000));
+    }
+
+    #[test]
+    fn disconnecting_powers_the_debug_domain_down() {
+        let mut dap = connected(Fake::nrf51());
+        assert!(dap.link.powered);
+        dap.disconnect().unwrap();
+        assert!(!dap.into_link().powered);
+    }
+
+    #[test]
+    fn disconnecting_after_a_fault_still_powers_down() {
+        let mut dap = connected(Fake::nrf51());
+        // Nothing's mapped there, so it FAULTs and leaves a sticky error.
+        assert!(dap.read32(0x3000_0000).is_err());
+        dap.disconnect().unwrap();
+        assert!(!dap.into_link().powered);
     }
 }

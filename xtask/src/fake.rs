@@ -21,7 +21,8 @@ pub struct Fake {
     pub running: bool,
     /// Answer the next DAP_Transfer with WAIT before doing any of it.
     pub wait_next_transfer: bool,
-    powered: bool,
+    /// Whether CTRL/STAT has both debug power-up requests set.
+    pub powered: bool,
     sticky: bool,
     select: u32,
     csw: u32,
@@ -148,6 +149,8 @@ impl Fake {
                 } else {
                     0
                 }),
+                // With a sticky error set, only ABORT writes go through.
+                (false, 0x4) if self.sticky => None,
                 (false, 0x4) => {
                     self.powered = data & 0x5000_0000 == 0x5000_0000;
                     Some(0)
