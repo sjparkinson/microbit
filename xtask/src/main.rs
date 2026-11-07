@@ -459,12 +459,23 @@ fn flash(name: &str, board: Board) -> Result<(), String> {
 
     let image = build(&[name.to_string()], &[board])?.remove(0);
     let mut dap = dap::Dap::new(hid::Hid::open(&probe)?);
-    let idcode = dap.connect(SWD_HZ)?;
-    println!("micro:bit {}, SWD IDCODE {idcode:#010x}", probe.serial);
-    let result = nrf::program(&mut dap, board.chip(), &image.segments, &mut |line| {
-        println!("  {line}")
-    });
-    // Let go of the target whatever happened, so DAPLink's own drive works.
+    let result = match dap.connect(SWD_HZ) {
+        Ok(idcode) => {
+            println!("micro:bit {}, SWD IDCODE {idcode:#010x}", probe.serial);
+            let programmed = nrf::program(&mut dap, board.chip(), &image.segments, &mut |line| {
+                println!("  {line}")
+            });
+            if programmed.is_err() {
+                // Best-effort, so a failure partway doesn't leave the core
+                // halted with debug on.
+                let _ = dap.clear_errors().and_then(|()| nrf::run(&mut dap));
+            }
+            programmed
+        }
+        Err(e) => Err(e),
+    };
+    // Let go of the target whatever happened, connect failing partway
+    // included, so DAPLink's own drive works.
     let disconnected = dap.disconnect();
     result?;
     disconnected?;
