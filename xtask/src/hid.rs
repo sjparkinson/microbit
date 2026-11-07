@@ -170,6 +170,14 @@ mod linux {
 
     impl crate::dap::Link for Hid {
         fn exchange(&mut self, command: &[u8]) -> Result<Vec<u8>, String> {
+            // A reply that turned up after its command timed out would
+            // otherwise answer this one.
+            let mut stale = [0u8; REPORT];
+            while readable(&self.0, Duration::ZERO).unwrap_or(false) {
+                if !matches!(self.0.read(&mut stale), Ok(1..)) {
+                    break;
+                }
+            }
             // hidraw wants the report ID first, which is 0 for none.
             let mut out = vec![0u8];
             out.extend(report(command)?);
@@ -215,6 +223,8 @@ mod macos {
     const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
     const K_IOHID_REPORT_TYPE_OUTPUT: u32 = 1;
     const K_IORETURN_SUCCESS: IOReturn = 0;
+    /// CFRunLoopRunInMode's result when it handled a source.
+    const K_CF_RUN_LOOP_RUN_HANDLED_SOURCE: i32 = 4;
 
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
@@ -459,9 +469,24 @@ mod macos {
                 };
                 // Anything left over from a previous run.
                 hid.pump(Duration::from_millis(20));
-                hid.inbox.reports.clear();
+                hid.drain();
                 Ok(hid)
             }
+        }
+
+        /// Throws away every report that's arrived, including any the run
+        /// loop hasn't handed to the callback yet. A reply that turns up
+        /// after its command timed out would otherwise answer the next one.
+        fn drain(&mut self) {
+            for _ in 0..64 {
+                // SAFETY: as in pump. A zero timeout handles what's
+                // already pending and returns.
+                let ran = unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 1) };
+                if ran != K_CF_RUN_LOOP_RUN_HANDLED_SOURCE {
+                    break;
+                }
+            }
+            self.inbox.reports.clear();
         }
 
         fn pump(&mut self, timeout: Duration) {
@@ -477,6 +502,7 @@ mod macos {
     impl crate::dap::Link for Hid {
         fn exchange(&mut self, command: &[u8]) -> Result<Vec<u8>, String> {
             let report = report(command)?;
+            self.drain();
             // SAFETY: an open device and a 64-byte buffer that outlives the
             // call.
             let sent = unsafe {
