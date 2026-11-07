@@ -1,0 +1,28 @@
+[package]
+name = "hello"
+description = "HELLO WORLD! scrolling across the LED matrix."
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[features]
+v1 = ["board/v1"]
+v2 = ["board/v2"]
+
+[dependencies]
+board = { path = "../../board" }
+
+# Only on the boards, so the host build has no runtime or panic handler to
+# clash with std's.
+[target.'cfg(target_os = "none")'.dependencies]
+cortex-m-rt = "0.7.7"
+panic-halt = "1.0.0"
+
+[[bin]]
+name = "hello"
+test = false
+bench = false
+
+[lints]
+workspace = true

@@ -21,6 +21,7 @@ The v2 has a notched edge connector and a speaker on the back, which is the quic
 | Name | What it does |
 |---|---|
 | [heartbeat](firmware/heartbeat) | A heart beating on the 5×5 matrix. A slows it down, B speeds it up. |
+| [hello](firmware/hello) | HELLO WORLD! scrolling across the matrix, over and over. |
 
 `cargo xtask list` prints the same list from what's in `firmware/`.
 
