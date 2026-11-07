@@ -444,13 +444,17 @@ fn flash(name: &str, board: Board, drive: Option<PathBuf>) -> Result<(), String>
     let image = build(&[name.to_string()], &[board])?.remove(0);
     let file = image.hex.file_name().expect("the hex has a file name");
     let to = drive.join(file);
-    let hex = fs::read(&image.hex).map_err(at(&image.hex))?;
-    let mut out = fs::File::create(&to).map_err(at(&to))?;
-    // The interface chip programs the target as the file streams in, so wait
-    // for it to land before saying it's done.
-    std::io::Write::write_all(&mut out, &hex)
-        .and_then(|()| out.sync_all())
-        .map_err(at(&to))?;
+    // Through `cp -X` rather than std::fs. On macOS a v1's DAPLink (0253)
+    // left files written by fs::write or fs::copy sitting on the drive
+    // unprogrammed, and took the same file from `cp -X` every time. I don't
+    // know why yet; docs/flashing.md has what was tried.
+    // -X (don't copy extended attributes) is BSD cp only; Linux's has no
+    // such attributes to copy anyway.
+    let mut cp = process::Command::new("cp");
+    if cfg!(target_os = "macos") {
+        cp.arg("-X");
+    }
+    run(cp.arg(&image.hex).arg(&to))?;
     println!(
         "copied {} to {}; the drive ejects itself once the board's programmed",
         relative(&image.hex),
