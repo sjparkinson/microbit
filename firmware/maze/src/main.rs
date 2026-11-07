@@ -27,7 +27,7 @@ fn main() -> ! {
         panic!("board taken twice");
     };
 
-    let Ok(mut accelerometer) = motion.accelerometer() else {
+    let Ok(mut accelerometer) = motion.accelerometer(&mut timer) else {
         loop {
             display.show(&mut timer, &NO_SENSOR, 1000);
         }
