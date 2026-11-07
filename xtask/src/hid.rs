@@ -44,11 +44,11 @@ pub use other::{Hid, list};
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod other {
-    //! Anywhere else: no USB, so `--drive` is the way.
+    //! Anywhere else: no USB, so no flashing.
 
     use super::Probe;
 
-    const UNSUPPORTED: &str = "flashing over USB only works on macOS and Linux; try --drive";
+    const UNSUPPORTED: &str = "flashing over USB only works on macOS and Linux";
 
     pub fn list() -> Result<Vec<Probe>, String> {
         Err(UNSUPPORTED.into())

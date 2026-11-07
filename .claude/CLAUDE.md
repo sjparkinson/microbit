@@ -10,7 +10,7 @@ cargo test --workspace --locked -q                              # host tests, ru
 cargo clippy --workspace --all-targets --locked -- -D warnings  # host lints
 cargo xtask check                                               # clippy and builds for both boards, what CI runs last
 cargo xtask build <name> [--board v1|v2]                        # ELF, hex, and flash/RAM use
-cargo xtask flash <name> [--board v1|v2] [--drive]              # erase, write, verify, reset over CMSIS-DAP
+cargo xtask flash <name> [--board v1|v2]                        # erase, write, verify, reset over CMSIS-DAP
 ```
 
 Plain `cargo test` only tests the root package, which has nothing in it, so always pass `--workspace`. `--board` defaults to v2.
@@ -26,7 +26,7 @@ Plain `cargo test` only tests the root package, which has nothing in it, so alwa
 - **Hardware differences live in `board`**, not in `#[cfg(feature = ...)]` scattered through firmware.
 - **The v1 has 16 KB of RAM and no FPU.** Check `cargo xtask build <name> --board v1` after anything that adds buffers or floats.
 - **Edit `.rs` files with Edit or Write**, not `sed -i`, `cp` or a heredoc. The lint hook only runs on Edit and Write.
-- **Flashing needs a micro:bit on USB.** Flashing can't damage the board, so running `cargo xtask flash` is fine when the user's asked for it. It talks CMSIS-DAP over USB HID (IOKit on macOS), which the sandbox blocks, so it needs the sandbox off; `--drive` writes outside the repo, which it blocks too. There's no probe-rs or `cargo flash` here, on purpose; don't add them back. Test any change to `xtask/src/dap.rs` or `nrf.rs` against the fake chip in `xtask/src/fake.rs` first, and add a case there for anything new.
+- **Flashing needs a micro:bit on USB.** Flashing can't damage the board, so running `cargo xtask flash` is fine when the user's asked for it. It talks CMSIS-DAP over USB HID (IOKit on macOS), which the sandbox blocks, so it needs the sandbox off. There's no probe-rs or `cargo flash` here, on purpose; don't add them back. Test any change to `xtask/src/dap.rs` or `nrf.rs` against the fake chip in `xtask/src/fake.rs` first, and add a case there for anything new.
 - **Nothing has run on hardware until the user says it has.** A build that passes isn't a board that works. Don't write it up as if it were.
 - **Mark uncertainty.** docs/hardware.md labels facts confirmed or likely. Keep doing that, and don't promote a guess.
 - **Git writes need the sandbox off** in this repo, since it denies writes to `.git`. Commits are single-line Conventional Commits, and the pre-commit hook runs the host tests first.
