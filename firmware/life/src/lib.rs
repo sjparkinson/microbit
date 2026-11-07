@@ -2,19 +2,27 @@
 //! the grid's a torus and a glider that walks off the right comes back on
 //! the left.
 //!
-//! It starts from a random soup and steps a generation every
-//! [`GENERATION_MS`]. Once the grid dies out or repeats one of its last
-//! [`HISTORY`] generations (a still life, a blinker, a glider gone all the way
-//! round), it carries on for [`HOLD_GENERATIONS`] more so you can see how it
-//! ended, then starts a new soup.
+//! It steps a generation every [`GENERATION_MS`]. Once the grid dies out or
+//! repeats one of its last [`HISTORY`] generations (a still life, a blinker,
+//! a glider gone all the way round), it carries on for [`HOLD_GENERATIONS`]
+//! more so you can see how it ended, then wipes across to a new start, a
+//! column at a time. One that's died out wipes after a single blank
+//! generation, since there's nothing to hold.
 //!
-//! Button A throws down a new soup straight away. Button B pauses and
-//! resumes.
+//! Most random grids on a 5×5 torus die or freeze within a few generations,
+//! which looks like noise, so a new start is one of two things:
 //!
-//! There's no entropy source on `board` yet, so every power-on starts from
-//! the same soup and the same sequence after it. Each button press stirs in
+//! - a random soup that's been played out ahead and either lasts
+//!   [`MIN_GENERATIONS`] or ends in an oscillator, or
+//! - one in [`PATTERN_ONE_IN`] times, a hand-picked pattern from [`PATTERNS`],
+//!   flipped, turned and moved somewhere at random.
+//!
+//! Button A wipes to a new start straight away. Button B pauses and resumes.
+//!
+//! There's no entropy source on `board` yet, so every power-on starts with
+//! the same glider and the same sequence after it. Each button press stirs in
 //! how many ticks it's been since power-on, which is as random as human
-//! timing, so the soups part ways from the first press.
+//! timing, so the sequence parts ways from the first press.
 //!
 //! Everything here is plain logic, tested on the host. `src/main.rs` reads the
 //! buttons, calls [`Game::tick`] and shows what it returns, every
@@ -28,8 +36,13 @@ use board::Image;
 /// show of the frame.
 pub const TICK_MS: u32 = 10;
 
-/// How long each generation stays up.
-pub const GENERATION_MS: u32 = 400;
+/// How long each generation stays up. Slow enough to see which cells made
+/// which.
+pub const GENERATION_MS: u32 = 650;
+
+/// How long each column of the wipe between starts takes. Five of them is
+/// 350 ms.
+pub const WIPE_STEP_MS: u32 = 70;
 
 /// How many past generations it remembers to spot a repeat. A glider on a
 /// 5×5 torus takes 20 generations to get back where it started, the longest
@@ -38,8 +51,20 @@ pub const GENERATION_MS: u32 = 400;
 pub const HISTORY: usize = 24;
 
 /// How many generations it keeps going once it's settled, before a new
-/// soup: two seconds at [`GENERATION_MS`].
+/// start: about three seconds at [`GENERATION_MS`].
 pub const HOLD_GENERATIONS: u8 = 5;
+
+/// How long a random soup has to keep changing, played out ahead, before
+/// it's shown. One that settles sooner only gets in if it ends oscillating.
+pub const MIN_GENERATIONS: u32 = 8;
+
+/// How many random soups it tries before giving up and showing a pattern.
+/// About half of them pass, so running out never really happens.
+const SOUP_TRIES: u32 = 32;
+
+/// How often a new start is a hand-picked pattern rather than a soup: one in
+/// this many.
+pub const PATTERN_ONE_IN: u32 = 4;
 
 /// How many ticks in a row a button has to read the same before it counts,
 /// which is 20 ms at [`TICK_MS`].
@@ -60,6 +85,40 @@ const ALL: u32 = (1 << (SIZE * SIZE)) - 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Grid(u32);
 
+/// A glider, heading down and to the right. It moves one cell diagonally
+/// every four generations, so it's home again in 20.
+pub const GLIDER: Grid = Grid::from_rows([
+    0b01000, //
+    0b00100, //
+    0b11100, //
+    0b00000, //
+    0b00000, //
+]);
+
+/// A blinker: three in a row, flipping between across and down.
+pub const BLINKER: Grid = Grid::from_rows([
+    0b00000, //
+    0b00000, //
+    0b01110, //
+    0b00000, //
+    0b00000, //
+]);
+
+/// A toad: two offset rows of three that rock back and forth.
+pub const TOAD: Grid = Grid::from_rows([
+    0b00000, //
+    0b01110, //
+    0b11100, //
+    0b00000, //
+    0b00000, //
+]);
+
+/// The hand-picked starts. Each keeps going on the 5×5 torus however it's
+/// placed, which the tests check. A beacon would be the obvious next one,
+/// but it's four wide, and on a torus five wide its blocks feel each other
+/// round the back and it dies.
+pub const PATTERNS: [Grid; 3] = [GLIDER, BLINKER, TOAD];
+
 impl Grid {
     /// Every cell dead.
     pub const EMPTY: Self = Self(0);
@@ -68,6 +127,24 @@ impl Grid {
     /// dropped.
     pub const fn from_bits(bits: u32) -> Self {
         Self(bits & ALL)
+    }
+
+    /// The grid from five rows, top first, each with its leftmost cell in
+    /// bit 4, so they read the right way round written in binary.
+    pub const fn from_rows(rows: [u8; SIZE]) -> Self {
+        let mut bits = 0;
+        let mut y = 0;
+        while y < SIZE {
+            let mut x = 0;
+            while x < SIZE {
+                if rows[y] >> (SIZE - 1 - x) & 1 != 0 {
+                    bits |= bit(x, y);
+                }
+                x += 1;
+            }
+            y += 1;
+        }
+        Self(bits)
     }
 
     /// The grid as 25 bits.
@@ -145,11 +222,127 @@ impl Grid {
         }
         Self(next)
     }
+
+    /// Each cell moved to wherever `to` says, from its column and row.
+    fn mapped(self, to: impl Fn(usize, usize) -> (usize, usize)) -> Self {
+        let mut bits = 0;
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                if self.alive(x, y) {
+                    let (nx, ny) = to(x, y);
+                    bits |= bit(nx, ny);
+                }
+            }
+        }
+        Self(bits)
+    }
+
+    /// The grid moved `dx` right and `dy` down, wrapping.
+    pub fn shifted(self, dx: usize, dy: usize) -> Self {
+        self.mapped(|x, y| ((x + dx) % SIZE, (y + dy) % SIZE))
+    }
+
+    /// The grid mirrored left to right.
+    pub fn flipped_across(self) -> Self {
+        self.mapped(|x, y| (SIZE - 1 - x, y))
+    }
+
+    /// The grid mirrored top to bottom.
+    pub fn flipped_down(self) -> Self {
+        self.mapped(|x, y| (x, SIZE - 1 - y))
+    }
+
+    /// The grid mirrored along the diagonal from top left to bottom right.
+    pub fn transposed(self) -> Self {
+        self.mapped(|x, y| (y, x))
+    }
 }
 
 /// The bit for column `x`, row `y`.
 const fn bit(x: usize, y: usize) -> u32 {
     1 << (y * SIZE + x)
+}
+
+/// Every cell in the columns left of `column`.
+const fn columns_before(column: usize) -> u32 {
+    let mut bits = 0;
+    let mut x = 0;
+    while x < column {
+        bits |= column_cells(x);
+        x += 1;
+    }
+    bits
+}
+
+/// Every cell in `column`.
+const fn column_cells(column: usize) -> u32 {
+    let mut bits = 0;
+    let mut y = 0;
+    while y < SIZE {
+        bits |= bit(column, y);
+        y += 1;
+    }
+    bits
+}
+
+/// Generations of one start, and enough of what came before to spot it
+/// repeating.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Run {
+    grid: Grid,
+    /// The generations before this one, oldest overwritten first. Only the
+    /// first `remembered` are real.
+    history: [Grid; HISTORY],
+    remembered: usize,
+    /// Where the next one goes in `history`.
+    slot: usize,
+    /// Generations since it died out or repeated, or `None` while it's
+    /// still going.
+    settled: Option<u8>,
+}
+
+impl Run {
+    const fn new(grid: Grid) -> Self {
+        Self {
+            grid,
+            history: [Grid::EMPTY; HISTORY],
+            remembered: 0,
+            slot: 0,
+            settled: None,
+        }
+    }
+
+    /// One generation on, noting when it's settled and counting from there.
+    fn step(&mut self) {
+        let next = self.grid.step();
+        self.history[self.slot] = self.grid;
+        self.slot = (self.slot + 1) % HISTORY;
+        self.remembered = (self.remembered + 1).min(HISTORY);
+        self.grid = next;
+        self.settled = match self.settled {
+            Some(held) => Some(held.saturating_add(1)),
+            None if next.is_empty() || self.seen(next) => Some(0),
+            None => None,
+        };
+    }
+
+    /// Whether `grid` is one of the remembered generations.
+    fn seen(&self, grid: Grid) -> bool {
+        self.history[..self.remembered].contains(&grid)
+    }
+}
+
+/// Whether a soup's worth showing: played out ahead, it's still changing
+/// after [`MIN_GENERATIONS`], or it's settled into something that moves.
+fn worth_watching(grid: Grid) -> bool {
+    let mut run = Run::new(grid);
+    for _ in 0..MIN_GENERATIONS {
+        run.step();
+        if run.settled.is_some() {
+            return !run.grid.is_empty() && run.grid.step() != run.grid;
+        }
+    }
+    true
 }
 
 /// A xorshift32 generator: small, quick on a Cortex-M0, and plenty random
@@ -181,7 +374,7 @@ impl Rng {
     }
 
     /// A random grid with each cell alive three times in eight, which is
-    /// about nine cells. Never empty.
+    /// about nine cells. Never empty, but often over in a few generations.
     pub const fn soup(&mut self) -> Grid {
         loop {
             let a = self.next();
@@ -191,6 +384,45 @@ impl Rng {
             if !grid.is_empty() {
                 return grid;
             }
+        }
+    }
+
+    /// A soup that's [`worth_watching`], or `None` if [`SOUP_TRIES`] in a
+    /// row weren't.
+    pub fn watchable_soup(&mut self) -> Option<Grid> {
+        (0..SOUP_TRIES)
+            .map(|_| self.soup())
+            .find(|&s| worth_watching(s))
+    }
+
+    /// One of [`PATTERNS`], in any of its eight orientations, anywhere.
+    pub fn pattern(&mut self) -> Grid {
+        let r = self.next();
+        // The pattern count is tiny, so this always fits.
+        let mut grid = PATTERNS[(r % PATTERNS.len() as u32) as usize];
+        if r & 1 << 4 != 0 {
+            grid = grid.flipped_across();
+        }
+        if r & 1 << 5 != 0 {
+            grid = grid.flipped_down();
+        }
+        if r & 1 << 6 != 0 {
+            grid = grid.transposed();
+        }
+        let dx = (r >> 8) as usize % SIZE;
+        let dy = (r >> 16) as usize % SIZE;
+        grid.shifted(dx, dy)
+    }
+
+    /// A new start: a pattern one in [`PATTERN_ONE_IN`] times, a watchable
+    /// soup otherwise.
+    pub fn start(&mut self) -> Grid {
+        if self.next().is_multiple_of(PATTERN_ONE_IN) {
+            return self.pattern();
+        }
+        match self.watchable_soup() {
+            Some(soup) => soup,
+            None => self.pattern(),
         }
     }
 }
@@ -233,21 +465,23 @@ impl Debounce {
     }
 }
 
-/// The game: the grid, what it's been lately, and the buttons.
+/// The wipe from the last start to a new one: a lit bar sweeps left to
+/// right, with the new grid behind it and the old one ahead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Wipe {
+    from: Grid,
+    /// Where the bar is, 0 to 4.
+    column: usize,
+}
+
+/// The game: the current run, the wipe if there's one going, and the
+/// buttons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Game {
-    grid: Grid,
-    /// The generations before this one, oldest overwritten first. Only the
-    /// first `remembered` are real.
-    history: [Grid; HISTORY],
-    remembered: usize,
-    /// Where the next one goes in `history`.
-    slot: usize,
-    /// Generations since it died out or repeated, or `None` while it's
-    /// still going.
-    settled: Option<u8>,
+    run: Run,
+    wipe: Option<Wipe>,
     paused: bool,
-    /// Milliseconds since the last generation.
+    /// Milliseconds since the last generation or wipe step.
     since_ms: u32,
     /// Ticks since power-on, for stirring into `rng`.
     ticks: u32,
@@ -257,43 +491,39 @@ pub struct Game {
 }
 
 impl Game {
-    /// A game on the power-on soup.
+    /// A game at power-on, which always starts with a glider.
     pub const fn new() -> Self {
-        let mut rng = Rng::new(SEED);
-        let grid = rng.soup();
-        Self::with(grid, rng)
+        Self::starting(GLIDER)
     }
 
     /// A game starting from `grid`, with the power-on random numbers for
-    /// the soups after it.
+    /// the starts after it.
     pub const fn starting(grid: Grid) -> Self {
-        Self::with(grid, Rng::new(SEED))
-    }
-
-    const fn with(grid: Grid, rng: Rng) -> Self {
         Self {
-            grid,
-            history: [Grid::EMPTY; HISTORY],
-            remembered: 0,
-            slot: 0,
-            settled: None,
+            run: Run::new(grid),
+            wipe: None,
             paused: false,
             since_ms: 0,
             ticks: 0,
-            rng,
+            rng: Rng::new(SEED),
             a: Debounce::new(),
             b: Debounce::new(),
         }
     }
 
-    /// The grid as it is now.
+    /// The grid as it is now. During a wipe, that's the new one.
     pub const fn grid(&self) -> Grid {
-        self.grid
+        self.run.grid
     }
 
     /// Whether it's died out or started repeating.
     pub const fn settled(&self) -> bool {
-        self.settled.is_some()
+        self.run.settled.is_some()
+    }
+
+    /// Whether it's wiping across to a new start.
+    pub const fn wiping(&self) -> bool {
+        self.wipe.is_some()
     }
 
     /// Whether B has it paused.
@@ -307,7 +537,7 @@ impl Game {
         self.ticks = self.ticks.wrapping_add(1);
         if self.a.update(a_raw) {
             self.rng.stir(self.ticks);
-            self.reseed();
+            self.restart();
         }
         if self.b.update(b_raw) {
             self.rng.stir(self.ticks);
@@ -315,57 +545,58 @@ impl Game {
         }
         if !self.paused {
             self.since_ms += TICK_MS;
-            if self.since_ms >= GENERATION_MS {
+            if let Some(wipe) = &mut self.wipe {
+                if self.since_ms >= WIPE_STEP_MS {
+                    self.since_ms = 0;
+                    wipe.column += 1;
+                    if wipe.column >= SIZE {
+                        self.wipe = None;
+                    }
+                }
+            } else if self.since_ms >= GENERATION_MS {
                 self.since_ms = 0;
                 self.advance();
             }
         }
-        self.grid.image()
+        self.frame()
     }
 
-    /// One generation on, or a new soup once it's been settled for
-    /// [`HOLD_GENERATIONS`].
+    /// What's on the matrix: the grid, or partway through a wipe.
+    pub fn frame(&self) -> Image {
+        let Some(wipe) = self.wipe else {
+            return self.run.grid.image();
+        };
+        let behind = columns_before(wipe.column);
+        let bar = column_cells(wipe.column);
+        let ahead = ALL & !behind & !bar;
+        Grid(self.run.grid.0 & behind | bar | wipe.from.0 & ahead).image()
+    }
+
+    /// One generation on, or a wipe to a new start once it's been settled
+    /// for [`HOLD_GENERATIONS`] (or straight after one blank generation, if
+    /// it died out).
     pub fn advance(&mut self) {
-        if let Some(held) = self.settled {
-            if held >= HOLD_GENERATIONS {
-                self.reseed();
+        if let Some(held) = self.run.settled {
+            let hold = if self.run.grid.is_empty() {
+                0
+            } else {
+                HOLD_GENERATIONS
+            };
+            if held >= hold {
+                self.restart();
                 return;
             }
-            self.settled = Some(held + 1);
         }
-
-        let next = self.grid.step();
-        self.remember(self.grid);
-        self.grid = next;
-        if self.settled.is_none() && (next.is_empty() || self.seen(next)) {
-            self.settled = Some(0);
-        }
+        self.run.step();
     }
 
-    /// Starts over on a new soup, forgetting the old history.
-    fn reseed(&mut self) {
-        let grid = self.rng.soup();
-        let rng = self.rng;
-        *self = Self {
-            paused: self.paused,
-            ticks: self.ticks,
-            a: self.a,
-            b: self.b,
-            ..Self::with(grid, rng)
-        };
-    }
-
-    fn remember(&mut self, grid: Grid) {
-        self.history[self.slot] = grid;
-        self.slot = (self.slot + 1) % HISTORY;
-        if self.remembered < HISTORY {
-            self.remembered += 1;
-        }
-    }
-
-    /// Whether `grid` is one of the remembered generations.
-    fn seen(&self, grid: Grid) -> bool {
-        self.history[..self.remembered].contains(&grid)
+    /// Starts over on a new start, forgetting the old history, and wipes
+    /// across to it.
+    fn restart(&mut self) {
+        let from = self.run.grid;
+        self.run = Run::new(self.rng.start());
+        self.wipe = Some(Wipe { from, column: 0 });
+        self.since_ms = 0;
     }
 }
 
@@ -378,12 +609,16 @@ impl Default for Game {
 #[cfg(test)]
 mod tests {
     extern crate std;
+    use std::collections::BTreeSet;
     use std::string::String;
     use std::vec::Vec;
 
     use super::*;
 
     const TICKS_PER_GENERATION: u32 = GENERATION_MS / TICK_MS;
+    const TICKS_PER_WIPE_STEP: u32 = WIPE_STEP_MS / TICK_MS;
+
+    const BLOCK: &str = "...../.##../.##../...../.....";
 
     /// A grid from text: `#` alive, anything else dead, rows split on `/`.
     fn grid(text: &str) -> Grid {
@@ -408,20 +643,10 @@ mod tests {
             .join("/")
     }
 
-    /// `grid` moved `dx` right and `dy` down, wrapping.
-    fn shifted(grid: Grid, dx: usize, dy: usize) -> Grid {
-        let mut bits = 0;
-        for y in 0..5 {
-            for x in 0..5 {
-                if grid.alive(x, y) {
-                    bits |= bit((x + dx) % 5, (y + dy) % 5);
-                }
-            }
-        }
-        Grid(bits)
+    /// `grid` after `n` generations.
+    fn after(grid: Grid, n: usize) -> Grid {
+        (0..n).fold(grid, |g, _| g.step())
     }
-
-    const GLIDER: &str = ".#.../..#../###../...../.....";
 
     /// Ticks with both buttons up `n` times.
     fn idle(game: &mut Game, n: u32) {
@@ -440,14 +665,26 @@ mod tests {
         }
     }
 
+    /// Advances a still life until it wipes to a new start.
+    fn settle_and_restart(game: &mut Game) {
+        while !game.wiping() {
+            game.advance();
+        }
+    }
+
     #[test]
     fn text_and_images_round_trip() {
-        let glider = grid(GLIDER);
-        assert_eq!(draw(glider), GLIDER);
-        assert_eq!(Grid::from_image(&glider.image()), glider);
-        assert_eq!(glider.population(), 5);
-        assert!(glider.alive(1, 0));
-        assert!(!glider.alive(0, 0));
+        let glider = grid(".#.../..#../###../...../.....");
+        assert_eq!(glider, GLIDER);
+        assert_eq!(draw(GLIDER), ".#.../..#../###../...../.....");
+        assert_eq!(Grid::from_image(&GLIDER.image()), GLIDER);
+        assert_eq!(GLIDER.population(), 5);
+    }
+
+    #[test]
+    fn patterns_read_the_way_they_are_written() {
+        assert_eq!(draw(BLINKER), "...../...../.###./...../.....");
+        assert_eq!(draw(TOAD), "...../.###./###../...../.....");
     }
 
     #[test]
@@ -481,16 +718,14 @@ mod tests {
 
     #[test]
     fn a_block_stays_put() {
-        let block = grid("...../.##../.##../...../.....");
-        assert_eq!(block.step(), block);
+        assert_eq!(grid(BLOCK).step(), grid(BLOCK));
     }
 
     #[test]
     fn a_blinker_flips_every_generation() {
-        let across = grid("...../...../.###./...../.....");
         let down = grid("...../..#../..#../..#../.....");
-        assert_eq!(across.step(), down);
-        assert_eq!(down.step(), across);
+        assert_eq!(BLINKER.step(), down);
+        assert_eq!(down.step(), BLINKER);
     }
 
     #[test]
@@ -502,22 +737,72 @@ mod tests {
 
     #[test]
     fn a_glider_moves_one_down_and_right_every_four() {
-        let glider = grid(GLIDER);
-        let mut g = glider;
-        for _ in 0..4 {
-            g = g.step();
-        }
-        assert_eq!(g, shifted(glider, 1, 1));
+        assert_eq!(after(GLIDER, 4), GLIDER.shifted(1, 1));
     }
 
     #[test]
     fn a_glider_gets_home_in_twenty() {
-        let glider = grid(GLIDER);
-        let mut g = glider;
         for generation in 1..=20 {
-            g = g.step();
+            let g = after(GLIDER, generation);
             assert_eq!(g.population(), 5);
-            assert_eq!(g == glider, generation == 20, "generation {generation}");
+            assert_eq!(g == GLIDER, generation == 20, "generation {generation}");
+        }
+    }
+
+    #[test]
+    fn shifts_and_flips_move_cells_where_they_should() {
+        let corner = grid("#..../...../...../...../.....");
+        assert_eq!(draw(corner.shifted(4, 1)), "...../....#/...../...../.....");
+        assert_eq!(
+            draw(corner.flipped_across()),
+            "....#/...../...../...../....."
+        );
+        assert_eq!(draw(corner.flipped_down()), "...../...../...../...../#....");
+        let top = grid(".#.../...../...../...../.....");
+        assert_eq!(draw(top.transposed()), "...../#..../...../...../.....");
+        assert_eq!(GLIDER.transposed().transposed(), GLIDER);
+    }
+
+    /// Every orientation and position of `pattern`.
+    fn placements(pattern: Grid) -> Vec<Grid> {
+        let mut all = Vec::new();
+        for turn in 0..8 {
+            let mut g = pattern;
+            if turn & 1 != 0 {
+                g = g.flipped_across();
+            }
+            if turn & 2 != 0 {
+                g = g.flipped_down();
+            }
+            if turn & 4 != 0 {
+                g = g.transposed();
+            }
+            for dy in 0..5 {
+                for dx in 0..5 {
+                    all.push(g.shifted(dx, dy));
+                }
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn every_pattern_keeps_moving_however_its_placed() {
+        for pattern in PATTERNS {
+            for placed in placements(pattern) {
+                for n in 0..40 {
+                    let g = after(placed, n);
+                    assert!(!g.is_empty(), "{} died", draw(placed));
+                    assert_ne!(g.step(), g, "{} froze", draw(placed));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oscillators_repeat_every_two() {
+        for pattern in [BLINKER, TOAD] {
+            assert_eq!(after(pattern, 2), pattern, "{}", draw(pattern));
         }
     }
 
@@ -539,51 +824,120 @@ mod tests {
         let total: u32 = soups.iter().map(|g| g.population()).sum();
         let mean = total / 1000;
         assert!((8..=10).contains(&mean), "mean population {mean}");
-        // And they're not all the same one.
         assert!(soups.windows(2).all(|pair| pair[0] != pair[1]));
     }
 
     #[test]
+    fn plenty_of_raw_soups_are_not_worth_watching() {
+        let mut rng = Rng::new(SEED);
+        let dull = (0..1000).filter(|_| !worth_watching(rng.soup())).count();
+        assert!((200..800).contains(&dull), "{dull} dull");
+    }
+
+    #[test]
+    fn watchable_soups_last_or_end_moving() {
+        let mut rng = Rng::new(SEED);
+        for _ in 0..1000 {
+            let soup = rng.watchable_soup().expect("32 dull soups in a row");
+            let mut run = Run::new(soup);
+            for _ in 0..MIN_GENERATIONS {
+                run.step();
+                if run.settled.is_some() {
+                    assert!(!run.grid.is_empty(), "{} died", draw(soup));
+                    assert_ne!(run.grid.step(), run.grid, "{} froze", draw(soup));
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn placed_gliders_head_all_four_ways() {
+        let mut rng = Rng::new(SEED);
+        let mut headings = BTreeSet::new();
+        for _ in 0..2000 {
+            let g = rng.pattern();
+            if g.population() != 5 {
+                continue;
+            }
+            let later = after(g, 4);
+            for (dx, dy) in [(1, 1), (4, 1), (1, 4), (4, 4)] {
+                if g.shifted(dx, dy) == later {
+                    headings.insert((dx, dy));
+                }
+            }
+        }
+        assert_eq!(headings.len(), 4, "{headings:?}");
+    }
+
+    #[test]
+    fn starts_mix_patterns_and_soups() {
+        let mut rng = Rng::new(SEED);
+        let mut patterns = 0;
+        for _ in 0..1000 {
+            let start = rng.start();
+            if PATTERNS.iter().any(|&p| placements(p).contains(&start)) {
+                patterns += 1;
+            }
+        }
+        // One in four, give or take, plus the odd soup that happens to be a
+        // blinker.
+        assert!((180..330).contains(&patterns), "{patterns} patterns");
+    }
+
+    #[test]
+    fn power_on_is_a_glider() {
+        assert_eq!(Game::new().grid(), GLIDER);
+        assert!(!Game::new().wiping());
+    }
+
+    #[test]
     fn a_generation_every_generation_ms() {
-        let mut game = Game::starting(grid(GLIDER));
+        let mut game = Game::new();
         idle(&mut game, TICKS_PER_GENERATION - 1);
-        assert_eq!(game.grid(), grid(GLIDER));
+        assert_eq!(game.grid(), GLIDER);
         game.tick(false, false);
-        assert_eq!(game.grid(), grid(GLIDER).step());
+        assert_eq!(game.grid(), GLIDER.step());
     }
 
     #[test]
     fn tick_shows_the_grid() {
-        let mut game = Game::starting(grid(GLIDER));
-        assert_eq!(game.tick(false, false), grid(GLIDER).image());
+        let mut game = Game::new();
+        assert_eq!(game.tick(false, false), GLIDER.image());
     }
 
     #[test]
-    fn a_still_life_settles_holds_then_reseeds() {
-        let block = grid("...../.##../.##../...../.....");
+    fn a_still_life_settles_holds_then_wipes() {
+        let block = grid(BLOCK);
         let mut game = Game::starting(block);
         game.advance();
         assert!(game.settled());
         for _ in 0..HOLD_GENERATIONS {
             game.advance();
             assert_eq!(game.grid(), block);
+            assert!(!game.wiping());
         }
         game.advance();
+        assert!(game.wiping());
         assert_ne!(game.grid(), block);
         assert!(!game.settled());
+        assert_eq!(game.run.remembered, 0);
     }
 
     #[test]
-    fn dying_out_settles() {
+    fn dying_out_wipes_after_one_blank_generation() {
         let mut game = Game::starting(grid("...../..##./...../...../....."));
         game.advance();
         assert!(game.grid().is_empty());
         assert!(game.settled());
+        assert!(!game.wiping());
+        game.advance();
+        assert!(game.wiping());
     }
 
     #[test]
     fn a_blinker_settles_after_two() {
-        let mut game = Game::starting(grid("...../...../.###./...../....."));
+        let mut game = Game::starting(BLINKER);
         game.advance();
         assert!(!game.settled());
         game.advance();
@@ -592,38 +946,70 @@ mod tests {
 
     #[test]
     fn a_glider_runs_all_the_way_round_before_settling() {
-        let mut game = Game::starting(grid(GLIDER));
+        let mut game = Game::new();
         for _ in 0..19 {
             game.advance();
             assert!(!game.settled());
         }
         game.advance();
         assert!(game.settled());
-        assert_eq!(game.grid(), grid(GLIDER));
+        assert_eq!(game.grid(), GLIDER);
     }
 
     #[test]
-    fn a_reseed_forgets_the_old_history() {
-        let block = grid("...../.##../.##../...../.....");
+    fn the_wipe_sweeps_a_bar_from_old_to_new() {
+        let block = grid(BLOCK);
         let mut game = Game::starting(block);
-        for _ in 0..=HOLD_GENERATIONS + 1 {
-            game.advance();
+        settle_and_restart(&mut game);
+        let new = game.grid();
+        assert_eq!(
+            draw(Grid::from_image(&game.frame())),
+            "#..../###../###../#..../#...."
+        );
+        for column in 1..5 {
+            idle(&mut game, TICKS_PER_WIPE_STEP);
+            let frame = Grid::from_image(&game.frame());
+            for y in 0..5 {
+                for x in 0..5 {
+                    let want = match x.cmp(&column) {
+                        core::cmp::Ordering::Less => new.alive(x, y),
+                        core::cmp::Ordering::Equal => true,
+                        core::cmp::Ordering::Greater => block.alive(x, y),
+                    };
+                    assert_eq!(frame.alive(x, y), want, "column {column}, {x},{y}");
+                }
+            }
         }
-        assert_eq!(game.remembered, 0);
-        assert!(!game.settled());
+        idle(&mut game, TICKS_PER_WIPE_STEP);
+        assert!(!game.wiping());
+        assert_eq!(game.frame(), new.image());
     }
 
     #[test]
-    fn a_throws_down_a_new_soup() {
-        let block = grid("...../.##../.##../...../.....");
+    fn the_new_start_gets_a_whole_generation_after_the_wipe() {
+        let mut game = Game::starting(grid(BLOCK));
+        settle_and_restart(&mut game);
+        let new = game.grid();
+        idle(&mut game, 5 * TICKS_PER_WIPE_STEP);
+        assert!(!game.wiping());
+        idle(&mut game, TICKS_PER_GENERATION - 1);
+        assert_eq!(game.grid(), new);
+        game.tick(false, false);
+        assert_eq!(game.grid(), new.step());
+    }
+
+    #[test]
+    fn a_wipes_to_a_new_start() {
+        let block = grid(BLOCK);
         let mut game = Game::starting(block);
         press(&mut game, true, false);
+        assert!(game.wiping());
         assert_ne!(game.grid(), block);
         assert!(!game.grid().is_empty());
     }
 
     #[test]
-    fn presses_at_different_times_give_different_soups() {
+    fn presses_at_different_times_give_different_starts() {
         let mut early = Game::new();
         let mut late = Game::new();
         idle(&mut late, 7);
@@ -634,7 +1020,7 @@ mod tests {
 
     #[test]
     fn b_pauses_and_resumes() {
-        let mut game = Game::starting(grid(GLIDER));
+        let mut game = Game::new();
         press(&mut game, false, true);
         assert!(game.paused());
         let held = game.grid();
@@ -647,27 +1033,26 @@ mod tests {
     }
 
     #[test]
-    fn a_while_paused_stays_paused() {
-        let mut game = Game::starting(grid(GLIDER));
-        press(&mut game, false, true);
+    fn pausing_holds_the_wipe_too() {
+        let mut game = Game::starting(grid(BLOCK));
         press(&mut game, true, false);
-        assert!(game.paused());
-        let soup = game.grid();
-        idle(&mut game, 10 * TICKS_PER_GENERATION);
-        assert_eq!(game.grid(), soup);
+        press(&mut game, false, true);
+        let frame = game.frame();
+        idle(&mut game, 10 * TICKS_PER_WIPE_STEP);
+        assert!(game.wiping());
+        assert_eq!(game.frame(), frame);
     }
 
     #[test]
-    fn holding_a_is_one_soup() {
-        let mut game = Game::starting(grid(GLIDER));
+    fn holding_a_is_one_restart() {
+        let mut game = Game::new();
         for _ in 0..DEBOUNCE_TICKS {
             game.tick(true, false);
         }
-        let soup = game.grid();
-        // Fewer ticks than a generation, so only another press could change it.
-        for _ in 0..TICKS_PER_GENERATION - u32::from(DEBOUNCE_TICKS) - 1 {
+        let start = game.grid();
+        for _ in 0..TICKS_PER_GENERATION {
             game.tick(true, false);
         }
-        assert_eq!(game.grid(), soup);
+        assert_eq!(game.grid(), start);
     }
 }
