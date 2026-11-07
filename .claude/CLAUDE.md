@@ -30,7 +30,7 @@ Plain `cargo test` only tests the root package, which has nothing in it, so alwa
 - **Nothing has run on hardware until the user says it has.** A build that passes isn't a board that works. Don't write it up as if it were.
 - **Mark uncertainty.** docs/hardware.md labels facts confirmed or likely. Keep doing that, and don't promote a guess.
 - **Git writes need the sandbox off** in this repo, since it denies writes to `.git`. Commits are single-line Conventional Commits, and the pre-commit hook runs the host tests first.
-- **Changes go in by pull request.** A ruleset blocks direct pushes to main and requires `test` and CodeQL to pass, with no bypass, so `--admin` doesn't help. Branch, push with `git push origin <branch>`, open it with `gh pr create --head <branch>`, then `gh pr merge --rebase --auto`.
+- **Changes go in by pull request.** A ruleset blocks direct pushes to main and requires `test` to pass, with no bypass, so `--admin` doesn't help. Branch, push with `git push origin <branch>`, open it with `gh pr create --head <branch>`, then `gh pr merge --rebase --auto`.
 - **PRs merge by rebase only**, so every commit on a branch lands on main as written. Keep each one single-line and passing.
 
 ## Things that look wrong but aren't

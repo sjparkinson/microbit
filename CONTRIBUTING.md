@@ -67,4 +67,4 @@ The v1 is the tighter of the two: a Cortex-M0 with 16 KB of RAM and no FPU, so f
 
 Single-line [Conventional Commits](https://www.conventionalcommits.org), such as `feat(heartbeat): flash the heart on a press`. Use the firmware's folder name as the scope, or `board` or `xtask`.
 
-Everything goes through a pull request. Main only takes changes that way, with `test` and CodeQL passing, and PRs merge by rebase only, so every commit on a branch lands on main as written. Keep each one single-line and passing the checks above on its own. Turn on auto-merge (`gh pr merge --rebase --auto`) and it goes in once the checks do.
+Everything goes through a pull request. Main only takes changes that way, with `test` passing, and PRs merge by rebase only, so every commit on a branch lands on main as written. Keep each one single-line and passing the checks above on its own. Turn on auto-merge (`gh pr merge --rebase --auto`) and it goes in once the checks do.
