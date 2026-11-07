@@ -21,6 +21,8 @@ That uses the debug probe, with a CMSIS-DAP client in `xtask` itself (`xtask/src
 6. reads every word back and compares;
 7. lets go of the core and resets it, so the firmware starts.
 
+Only flash gets programmed. An image that puts anything outside it, such as UICR settings, fails at `cargo xtask build`, so the hex for the MICROBIT drive never holds something the debug probe would skip. Nothing here sets UICR yet; when something does, both paths will need to learn it together.
+
 Pages the image doesn't touch are left alone. On the v2 it checks the nRF52's access port protection first, and if it's on it erases the whole chip through the CTRL-AP, which is the only way back in. That path has only run against the fake chip in `xtask/src/fake.rs`, since only a v1 has been tried so far.
 
 The board IDs come from the micro:bit Foundation's [universal hex code](https://github.com/microbit-foundation/microbit-universal-hex/blob/main/src/universal-hex.ts), which gives 9900 and 9901 for the v1 and 9903 for the v2. A v1.5 here reports 9901. If `flash` doesn't recognise the ID it warns and goes by the CPUID alone.

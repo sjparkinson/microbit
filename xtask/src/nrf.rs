@@ -112,11 +112,12 @@ pub fn program<L: Link>(
         page
     ));
 
-    // Sorted, so the last word is the highest.
+    // Sorted, so the last word is the highest. Flash starts at 0, so that's
+    // the only end to check. This is what keeps UICR segments out.
     let words = words(segments)?;
     if let Some(&(address, _)) = words.last().filter(|&&(address, _)| address >= size) {
         return Err(format!(
-            "the image reaches {address:#x}, past the end of flash"
+            "the image reaches {address:#x}, past the end of flash, and only flash gets programmed"
         ));
     }
 
@@ -398,6 +399,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("past the end"), "{err}");
+    }
+
+    #[test]
+    fn refuses_uicr_and_leaves_flash_alone() {
+        let mut dap = connected(Fake::nrf52(false));
+        let mut segments = image();
+        segments.push(segment(0x1000_1014, vec![0xAA; 4]));
+        let err = program(&mut dap, Chip::Nrf52, &segments, &mut |_| {}).unwrap_err();
+        assert!(err.contains("0x10001014"), "{err}");
+        assert!(dap.into_link().flash.iter().all(|&b| b == 0x5A));
     }
 
     #[test]
