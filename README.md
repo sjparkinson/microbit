@@ -19,6 +19,7 @@ The v2 has a notched edge connector and a speaker on the back, which is the quic
 |---|---|
 | [heartbeat](firmware/heartbeat) | A heart beating on the 5×5 matrix. A slows it down, B speeds it up. |
 | [hello](firmware/hello) | HELLO WORLD! scrolling across the matrix, over and over. |
+| [life](firmware/life) | Conway's Game of Life on a wrapping 5×5 grid, with a new random soup once it settles. A throws a new soup, B pauses. |
 
 `cargo xtask list` prints the same list from what's in `firmware/`.
 
