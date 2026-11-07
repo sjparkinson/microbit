@@ -13,6 +13,12 @@ v2 = ["board/v2"]
 [dependencies]
 board = { path = "../../board" }
 
+# Only on the boards, so the host build has no runtime or panic handler to
+# clash with std's.
+[target.'cfg(target_os = "none")'.dependencies]
+cortex-m-rt = "0.7.7"
+panic-halt = "1.0.0"
+
 [[bin]]
 name = "heartbeat"
 test = false

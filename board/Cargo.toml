@@ -6,9 +6,23 @@ authors.workspace = true
 repository.workspace = true
 license.workspace = true
 
+# Pick one. With neither, the crate is only the `Image` type, which is what the
+# host build and tests see.
 [features]
-v1 = []
-v2 = []
+v1 = ["dep:microbit", "dep:embedded-hal"]
+v2 = ["dep:microbit-v2", "dep:embedded-hal"]
+
+# The BSPs only come in on their own target, so a feature on the wrong target
+# reaches the `compile_error!` in src/lib.rs instead of failing somewhere deep
+# in a HAL. thumbv6m-none-eabi is the only bare-metal `eabi` target we build
+# for, and thumbv7em-none-eabihf the only `eabihf` one.
+[target.'cfg(all(target_os = "none", target_abi = "eabi"))'.dependencies]
+microbit = { version = "0.16.0", optional = true }
+embedded-hal = { version = "1.0.0", optional = true }
+
+[target.'cfg(all(target_os = "none", target_abi = "eabihf"))'.dependencies]
+microbit-v2 = { version = "0.16.0", optional = true }
+embedded-hal = { version = "1.0.0", optional = true }
 
 [lints]
 workspace = true
