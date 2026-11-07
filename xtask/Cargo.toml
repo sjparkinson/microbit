@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+description = "Builds and flashes the firmware in firmware/."
+publish = false
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

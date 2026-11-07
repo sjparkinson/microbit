@@ -1,0 +1,22 @@
+[package]
+name = "heartbeat"
+description = "A heart that beats on the LED matrix."
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[features]
+v1 = ["board/v1"]
+v2 = ["board/v2"]
+
+[dependencies]
+board = { path = "../../board" }
+
+[[bin]]
+name = "heartbeat"
+test = false
+bench = false
+
+[lints]
+workspace = true

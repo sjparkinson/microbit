@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["board", "firmware/*", "xtask"]
+
+[workspace.package]
+edition = "2024"
+authors = ["Samuel Parkinson <samuel.parkinson@hey.com>"]
+repository = "https://github.com/sjparkinson/microbit"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
+# Panics can't unwind on a Cortex-M. Debug info only lands in the ELF, never
+# in what's flashed.
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = true
+
+[profile.dev]
+panic = "abort"
+opt-level = "s"

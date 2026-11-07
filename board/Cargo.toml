@@ -1,0 +1,14 @@
+[package]
+name = "board"
+description = "One API over the micro:bit v1 and v2."
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[features]
+v1 = []
+v2 = []
+
+[lints]
+workspace = true
