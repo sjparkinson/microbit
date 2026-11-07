@@ -341,7 +341,7 @@ struct Image {
     flash: u32,
     ram: u32,
     hex: PathBuf,
-    /// What goes into flash.
+    /// What gets programmed, all of it in flash.
     segments: Vec<elf::Segment>,
 }
 
@@ -378,6 +378,7 @@ fn package(name: &str, board: Board) -> Result<Image, String> {
     let path = target.join(board.target()).join("release").join(name);
     let bytes = fs::read(&path).map_err(at(&path))?;
     let elf = elf::Elf::parse(&bytes).map_err(at(&path))?;
+    only_flash(elf.segments(), &board.flash()).map_err(at(&path))?;
 
     let out = target.join(OUT);
     fs::create_dir_all(&out).map_err(at(&out))?;
@@ -393,8 +394,29 @@ fn package(name: &str, board: Board) -> Result<Image, String> {
         flash: elf.flash_bytes(&board.flash()),
         ram: elf.ram_bytes(&board.ram()),
         hex,
-        segments: elf.flash_segments(&board.flash()).cloned().collect(),
+        segments: elf.segments().to_vec(),
     })
+}
+
+/// Refuses an image that puts anything outside `flash`, such as UICR
+/// settings. The debug probe only programs flash, so a hex that wrote the
+/// UICR through the MICROBIT drive would flash differently from it.
+fn only_flash(segments: &[elf::Segment], flash: &Range<u32>) -> Result<(), String> {
+    let outside = segments.iter().find(|s| {
+        let end = u64::from(s.address) + s.data.len() as u64;
+        !flash.contains(&s.address) || end > u64::from(flash.end)
+    });
+    match outside {
+        Some(s) => Err(format!(
+            "the image puts {} bytes at {:#010x}, outside flash ({:#x}..{:#x}); \
+             xtask only programs flash, so it doesn't write UICR settings or anything else",
+            s.data.len(),
+            s.address,
+            flash.start,
+            flash.end
+        )),
+        None => Ok(()),
+    }
 }
 
 /// `cargo <command> --release` for `names` on `board`'s target, with its
@@ -811,6 +833,22 @@ name = \"not-this\"
             row("x", 9, Board::V1, 262_144, 16_384, "x-v1.hex"),
             "x          v1  flash 262,144 / 262,144 100.0%  ram  16,384 /  16,384 100.0%  x-v1.hex"
         );
+    }
+
+    #[test]
+    fn refuses_an_image_with_anything_outside_flash() {
+        let segment = |address, len| elf::Segment {
+            address,
+            data: vec![0; len],
+        };
+        let flash = Board::V2.flash();
+        assert!(only_flash(&[segment(0, 4), segment(0x7_FFFC, 4)], &flash).is_ok());
+        let uicr = only_flash(&[segment(0, 4), segment(0x1000_1014, 4)], &flash).unwrap_err();
+        assert!(
+            uicr.contains("0x10001014") && uicr.contains("UICR"),
+            "{uicr}"
+        );
+        assert!(only_flash(&[segment(0x7_FFFC, 8)], &flash).is_err());
     }
 
     #[test]
