@@ -117,14 +117,51 @@ type SensorBus = hal::Twim<pac::TWIM0>;
 /// The motion sensor, on its I2C bus, before anything's been sent to it.
 pub struct MotionSensor(SensorBus);
 
+/// How many times [`MotionSensor::accelerometer`] tries a chip that doesn't
+/// answer, and how long it waits between tries.
+const PROBE_TRIES: u32 = 10;
+const PROBE_GAP_MS: u32 = 5;
+
 impl MotionSensor {
     /// Checks the chip is an LSM303AGR and turns its accelerometer on.
     ///
-    /// It talks to the chip, so it blocks for the length of three short I2C
-    /// transfers. [`Board::take`] leaves it to the firmware so that a
-    /// firmware can have something on the display first.
-    pub fn accelerometer(self) -> Result<Accelerometer, SensorError> {
-        Accelerometer::new(self.0)
+    /// Straight after power-on the sensor can still be booting and not
+    /// answer, as it didn't on a v1.5 started from a battery, so a bus error
+    /// gets [`PROBE_TRIES`] tries [`PROBE_GAP_MS`] apart, about 50 ms in
+    /// all, resetting the I2C peripheral between them. A chip that answers
+    /// with the wrong ID isn't tried again. [`Board::take`] leaves this to
+    /// the firmware so that a firmware can have something on the display
+    /// first.
+    pub fn accelerometer(self, timer: &mut Timer) -> Result<Accelerometer, SensorError> {
+        let mut bus = self.0;
+        for _ in 1..PROBE_TRIES {
+            match Accelerometer::new(bus) {
+                Err((failed, SensorError::Bus)) => {
+                    timer.delay_ms(PROBE_GAP_MS);
+                    bus = reset_bus(failed);
+                }
+                done => return done.map_err(|(_, error)| error),
+            }
+        }
+        Accelerometer::new(bus).map_err(|(_, error)| error)
+    }
+}
+
+/// Turns the I2C peripheral off and on again, to clear whatever state a
+/// failed transfer left it in. The nRF51's TWI stops short on a NACK
+/// without a STOP, and `Twi::new` alone doesn't disable it first.
+fn reset_bus(bus: SensorBus) -> SensorBus {
+    #[cfg(feature = "v1")]
+    {
+        let (twi, pins) = bus.free();
+        twi.enable.write(|w| w.enable().disabled());
+        hal::Twi::new(twi, pins, hal::twi::Frequency::K100)
+    }
+    #[cfg(feature = "v2")]
+    {
+        let (twim, pins) = bus.free();
+        twim.enable.write(|w| w.enable().disabled());
+        hal::Twim::new(twim, pins, hal::twim::Frequency::K100)
     }
 }
 
@@ -152,19 +189,27 @@ const AUTO_INCREMENT: u8 = 0x80;
 pub struct Accelerometer(SensorBus);
 
 impl Accelerometer {
-    fn new(bus: SensorBus) -> Result<Self, SensorError> {
+    /// Checks the chip's ID and turns it on. On failure the bus comes back
+    /// too, for another try.
+    fn new(bus: SensorBus) -> Result<Self, (SensorBus, SensorError)> {
         let mut sensor = Self(bus);
+        match sensor.start() {
+            Ok(()) => Ok(sensor),
+            Err(error) => Err((sensor.0, error)),
+        }
+    }
+
+    fn start(&mut self) -> Result<(), SensorError> {
         let mut id = [0];
-        sensor.read_registers(WHO_AM_I_A, &mut id)?;
+        self.read_registers(WHO_AM_I_A, &mut id)?;
         if id[0] != 0x33 {
             return Err(SensorError::WrongChip(id[0]));
         }
         // Block data update (so a reading's two bytes always match),
         // ±2 g, high resolution.
-        sensor.write_register(CTRL_REG4_A, 0x88)?;
+        self.write_register(CTRL_REG4_A, 0x88)?;
         // 100 Hz, normal power, X, Y and Z on.
-        sensor.write_register(CTRL_REG1_A, 0x57)?;
-        Ok(sensor)
+        self.write_register(CTRL_REG1_A, 0x57)
     }
 
     /// The latest reading. Reading faster than 100 times a second returns

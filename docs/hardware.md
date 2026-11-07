@@ -99,6 +99,8 @@ The micro:bit's runtime turns the chip's axes into the board's in two steps. Its
 
 A reset restarts the nRF but not the sensor, so a reset in the middle of a read can leave the LSM303AGR holding SDA low. After that the nRF51's TWI waits forever for the bus, and a v1.5 hung like that until `board` started clocking SCL nine times and sending a STOP before turning the TWI on. Confirmed on a v1.5. That first hang started with nrf-hal 0.19's embedded-hal `I2c` for the nRF51 TWI, which reads without the shortcuts the nRF51 needs to pause the bus between bytes. `board` calls the HAL's own `write_then_read`, which uses them. Likely: the fix and the recovery went on together, so the board never showed which one mattered.
 
+Started cold, from a battery or a fresh USB plug, a v1.5 didn't answer the first probe of `WHO_AM_I_A`, while a reset with power already on always worked. Trying again every 5 ms, for up to 50 ms, fixed it. Confirmed on a v1.5. The cause is likely the sensor still booting when the nRF reaches it, about a millisecond after power-on, but nothing here has measured how long it takes.
+
 The runtime finds its sensor by probing each chip's `WHO_AM_I` in turn: MMA8653 (7-bit 0x1D, register 0x0D, 0x5A), then LSM303 (0x19, 0x0F, 0x33), then FXOS8700 (0x1E, 0x0D, 0xC7) ([microbit-dal `MicroBitAccelerometer.cpp`](https://github.com/lancaster-university/microbit-dal/blob/318c6abbb3d952d3f49a595a726486230e82fb5b/source/drivers/MicroBitAccelerometer.cpp)). Confirmed for the runtime. `board` only probes for the LSM303AGR.
 
 ## Serial

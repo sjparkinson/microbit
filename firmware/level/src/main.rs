@@ -27,7 +27,7 @@ fn main() -> ! {
     };
 
     display.show(&mut timer, &STARTING, 500);
-    let mut accelerometer = match motion.accelerometer() {
+    let mut accelerometer = match motion.accelerometer(&mut timer) {
         Ok(accelerometer) => accelerometer,
         Err(error) => loop {
             display.show(&mut timer, &error_frame(error), 1000);
