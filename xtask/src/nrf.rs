@@ -113,7 +113,7 @@ pub fn program<L: Link>(
     ));
 
     // Sorted, so the last word is the highest.
-    let words = words(segments);
+    let words = words(segments)?;
     if let Some(&(address, _)) = words.last().filter(|&&(address, _)| address >= size) {
         return Err(format!(
             "the image reaches {address:#x}, past the end of flash"
@@ -222,26 +222,33 @@ pub fn run<L: Link>(dap: &mut Dap<L>) -> Result<(), String> {
 }
 
 /// The segments as sorted, word-aligned `(address, word)` pairs, padding
-/// with 0xFF (erased flash) where a segment starts or ends mid-word.
-fn words(segments: &[Segment]) -> Vec<(u32, u32)> {
-    let mut bytes = std::collections::BTreeMap::new();
-    for Segment { address, data } in segments {
-        for (i, &byte) in data.iter().enumerate() {
-            bytes.insert(address + u32::try_from(i).expect("fits"), byte);
-        }
-    }
+/// with 0xFF (erased flash) where a segment starts or ends mid-word. Two
+/// segments that share a word share its pair.
+///
+/// One pass, so the segments have to be in address order and not overlap,
+/// which is how `elf::Elf::parse` hands them over. Anything else is refused.
+fn words(segments: &[Segment]) -> Result<Vec<(u32, u32)>, String> {
     let mut words: Vec<(u32, u32)> = Vec::new();
-    for (&address, &byte) in &bytes {
-        let word = address & !3;
-        let shift = 8 * (address & 3);
-        match words.last_mut() {
-            Some((at, value)) if *at == word => {
-                *value = (*value & !(0xFF << shift)) | (u32::from(byte) << shift);
-            }
-            _ => words.push((word, !(0xFF << shift) | (u32::from(byte) << shift))),
+    let mut next = 0u32;
+    for Segment { address, data } in segments {
+        if *address < next {
+            return Err(format!(
+                "the image's segments overlap or are out of order at {address:#x}"
+            ));
         }
+        for (address, &byte) in (*address..).zip(data) {
+            let word = address & !3;
+            let shift = 8 * (address & 3);
+            match words.last_mut() {
+                Some((at, value)) if *at == word => {
+                    *value = (*value & !(0xFF << shift)) | (u32::from(byte) << shift);
+                }
+                _ => words.push((word, !(0xFF << shift) | (u32::from(byte) << shift))),
+            }
+        }
+        next = address.saturating_add(u32::try_from(data.len()).unwrap_or(u32::MAX));
     }
-    words
+    Ok(words)
 }
 
 #[cfg(test)]
@@ -269,7 +276,64 @@ mod tests {
     #[test]
     fn words_are_aligned_and_padded_with_erased_bytes() {
         let words = words(&[segment(0x101, vec![0x11, 0x22]), segment(0x108, vec![0x33])]);
-        assert_eq!(words, [(0x100, 0xFF22_11FF), (0x108, 0xFFFF_FF33)]);
+        assert_eq!(words, Ok(vec![(0x100, 0xFF22_11FF), (0x108, 0xFFFF_FF33)]));
+    }
+
+    /// How `words` used to do it: every byte into a map, then back out.
+    fn words_by_map(segments: &[Segment]) -> Vec<(u32, u32)> {
+        let mut bytes = std::collections::BTreeMap::new();
+        for Segment { address, data } in segments {
+            for (address, &byte) in (*address..).zip(data) {
+                bytes.insert(address, byte);
+            }
+        }
+        let mut words: Vec<(u32, u32)> = Vec::new();
+        for (&address, &byte) in &bytes {
+            let (word, shift) = (address & !3, 8 * (address & 3));
+            match words.last_mut() {
+                Some((at, value)) if *at == word => {
+                    *value = (*value & !(0xFF << shift)) | (u32::from(byte) << shift);
+                }
+                _ => words.push((word, !(0xFF << shift) | (u32::from(byte) << shift))),
+            }
+        }
+        words
+    }
+
+    #[test]
+    fn words_match_the_byte_map_they_replaced() {
+        let cases = [
+            image(),
+            vec![],
+            vec![segment(0x3, vec![1])],
+            // Two segments sharing a word, from both ends.
+            vec![
+                segment(0x10, vec![1, 2, 3, 4, 5]),
+                segment(0x16, vec![6, 7]),
+            ],
+            vec![segment(0x10, vec![1, 2]), segment(0x12, vec![3, 4])],
+            // An empty segment in the middle, and a gap of whole words.
+            vec![
+                segment(0x20, vec![9; 7]),
+                segment(0x27, vec![]),
+                segment(0x40, vec![8; 9]),
+            ],
+        ];
+        for segments in cases {
+            assert_eq!(
+                words(&segments),
+                Ok(words_by_map(&segments)),
+                "{segments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn words_refuse_overlapping_or_unsorted_segments() {
+        let overlap = [segment(0x10, vec![1; 8]), segment(0x14, vec![2])];
+        assert!(words(&overlap).unwrap_err().contains("overlap"));
+        let unsorted = [segment(0x100, vec![1]), segment(0x0, vec![2])];
+        assert!(words(&unsorted).unwrap_err().contains("out of order"));
     }
 
     #[test]
