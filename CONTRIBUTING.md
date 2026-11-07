@@ -21,6 +21,7 @@ Plain `cargo test` only tests the root package, which here is nothing, so pass `
 board/                  one API over both boards, on top of the nrf-rs BSPs
   src/lib.rs            what every build sees, host included (the Image type)
   src/hw.rs             the board itself: display, buttons, timer (thumb targets only)
+  src/approtect.rs      keeps a hardened nRF52833's debug port open (v2 only)
 firmware/<name>/        one crate per firmware
   src/lib.rs            no_std logic, tested on the host
   src/main.rs           a thin loop between board and the library (a stub on the host)
@@ -58,7 +59,7 @@ The v1 is the tighter of the two: a Cortex-M0 with 16 KB of RAM and no FPU, so f
 
 ## Unsafe
 
-`unsafe_code` is denied across the workspace. The BSPs and HALs do the register work, so firmware shouldn't need it. The one exception is `xtask/src/hid.rs`, which calls IOKit through its C API because xtask has no crates. Every `unsafe` block gets a `// SAFETY:` comment.
+`unsafe_code` is denied across the workspace. The BSPs and HALs do the register work, so firmware shouldn't need it. There are two exceptions. `xtask/src/hid.rs` calls IOKit through its C API because xtask has no crates, and `board/src/approtect.rs` reads two FICR words and writes APPROTECT.DISABLE, which the nRF52833 PAC doesn't cover. Every `unsafe` block gets a `// SAFETY:` comment.
 
 ## Commits
 
