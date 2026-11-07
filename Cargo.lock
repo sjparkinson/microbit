@@ -230,6 +230,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "maze"
+version = "0.0.0"
+dependencies = [
+ "board",
+ "cortex-m-rt",
+ "panic-halt",
+]
+
+[[package]]
 name = "microbit"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
