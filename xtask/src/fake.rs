@@ -7,15 +7,41 @@
 //! where that's cheap: flash written without NVMC CONFIG set to write is a
 //! FAULT, flash bits only ever clear on a write, and any address it doesn't
 //! model is a FAULT.
+//!
+//! The nRF52833 comes in two kinds of access port protection, and the fake
+//! does both (docs/hardware.md has the sources):
+//!
+//! - Revision 1 (build code Axx): locked only if UICR.APPROTECT says so. My
+//!   guess is that a CTRL-AP ERASEALL takes effect at the next CTRL-AP reset,
+//!   so that's how the fake does it.
+//! - Revision 2 (Bxx, "hardened"): locked at every pin or power reset unless
+//!   UICR.APPROTECT is HwDisabled *and* the firmware writes APPROTECT.DISABLE
+//!   as it boots. An ERASEALL opens it until the next such reset. Soft resets
+//!   (SYSRESETREQ, CTRL-AP RESET) aren't on Nordic's list of what locks it
+//!   again, so here they don't.
 
 const PAGE_51: usize = 1024;
 const PAGE_52: usize = 4096;
+
+const UICR_APPROTECT: u32 = 0x1000_1208;
+const HW_DISABLED: u32 = 0x5A;
 
 pub struct Fake {
     pub flash: Vec<u8>,
     page: usize,
     nrf52: bool,
+    /// The nRF52833 revision 2 kind of access port protection.
+    hardened: bool,
     locked: bool,
+    /// UICR.APPROTECT, the only UICR word the fake has.
+    pub uicr_approtect: u32,
+    /// Whether the firmware in flash writes APPROTECT.DISABLE as it boots,
+    /// as `board` does on a hardened chip. Only matters on a power cycle.
+    pub firmware_disables_approtect: bool,
+    /// Revision 1: an ERASEALL that's waiting for a CTRL-AP reset.
+    erased_until_reset: bool,
+    /// How many times the CTRL-AP's reset was let go of.
+    pub ctrl_ap_resets: u32,
     /// A flash word that ignores writes, to check the verify.
     pub stuck_word: Option<u32>,
     pub running: bool,
@@ -45,17 +71,52 @@ impl Fake {
         Self::new(256 * 1024, PAGE_51, false, false)
     }
 
+    /// A revision 1 nRF52833, with protection on or off in its UICR.
     pub fn nrf52(locked: bool) -> Self {
-        Self::new(512 * 1024, PAGE_52, true, locked)
+        let mut fake = Self::new(512 * 1024, PAGE_52, true, false);
+        fake.uicr_approtect = if locked { 0xFFFF_FF00 } else { u32::MAX };
+        fake.power_cycle();
+        fake
     }
 
-    fn new(size: usize, page: usize, nrf52: bool, locked: bool) -> Self {
+    /// A revision 2 nRF52833 that's just been plugged in with nothing in
+    /// its UICR, so locked.
+    pub fn nrf52_hardened() -> Self {
+        let mut fake = Self::new(512 * 1024, PAGE_52, true, true);
+        fake.power_cycle();
+        fake
+    }
+
+    /// Unplugs it and plugs it back in: a power-on reset, then whatever the
+    /// firmware does as it boots.
+    pub fn power_cycle(&mut self) {
+        self.locked = if self.hardened {
+            let has_firmware = self.flash[..4] != [0xFF; 4];
+            !(self.uicr_approtect == HW_DISABLED
+                && has_firmware
+                && self.firmware_disables_approtect)
+        } else {
+            // Anything but 0xFF in PALL is on.
+            self.uicr_approtect & 0xFF != 0xFF
+        };
+        self.erased_until_reset = false;
+        self.halted = false;
+        self.debugen = false;
+        self.running = true;
+    }
+
+    fn new(size: usize, page: usize, nrf52: bool, hardened: bool) -> Self {
         Fake {
             // Whatever was there before: not erased.
             flash: vec![0x5A; size],
             page,
             nrf52,
-            locked,
+            hardened,
+            locked: false,
+            uicr_approtect: u32::MAX,
+            firmware_disables_approtect: false,
+            erased_until_reset: false,
+            ctrl_ap_resets: 0,
             stuck_word: None,
             running: true,
             wait_next_transfer: false,
@@ -81,6 +142,11 @@ impl Fake {
             }
             0x1000_0010 => self.page as u32,
             0x1000_0014 => (self.flash.len() / self.page) as u32,
+            // What nrfx's nrf52_configuration_249() reads: 0x0D for an
+            // nRF52833, then 0 for revision 1 and anything else for later.
+            0x1000_0130 if self.nrf52 => 0x0D,
+            0x1000_0134 if self.nrf52 => u32::from(self.hardened),
+            UICR_APPROTECT if self.nrf52 => self.uicr_approtect,
             0x4001_E400 => 1,
             0x4001_E504 => self.config,
             0xE000_ED00 if self.nrf52 => 0x410F_C241,
@@ -105,6 +171,7 @@ impl Fake {
                     self.flash[a + i] &= byte;
                 }
             }
+            UICR_APPROTECT if self.nrf52 && self.config == 1 => self.uicr_approtect &= value,
             0x4001_E504 if value <= 2 => self.config = value,
             0x4001_E508
                 if self.config == 2
@@ -212,11 +279,25 @@ impl Fake {
 
     fn ctrl_ap(&mut self, read: bool, reg: u8, data: u32) -> Option<u32> {
         match (read, reg) {
-            (false, 0x00) => Some(0),
+            (false, 0x00) => {
+                if data & 1 == 0 {
+                    self.ctrl_ap_resets += 1;
+                    if self.erased_until_reset {
+                        self.erased_until_reset = false;
+                        self.locked = false;
+                    }
+                }
+                Some(0)
+            }
             (false, 0x04) => {
                 if data & 1 != 0 && !self.erase_all {
                     self.flash.fill(0xFF);
-                    self.locked = false;
+                    self.uicr_approtect = u32::MAX;
+                    if self.hardened {
+                        self.locked = false;
+                    } else {
+                        self.erased_until_reset = self.locked;
+                    }
                 }
                 self.erase_all = data & 1 != 0;
                 Some(0)

@@ -20,6 +20,15 @@ const CONFIG_ERASE: u32 = 2;
 
 const FICR_CODEPAGESIZE: u32 = 0x1000_0010;
 const FICR_CODESIZE: u32 = 0x1000_0014;
+/// Undocumented FICR words that nrfx reads to tell the nRF52833's hardened
+/// revision apart: 0x0D, then 0 for revision 1 and anything else for later
+/// ones (nrfx nrf52_erratas.h, `nrf52_configuration_249`).
+const FICR_CONFIG_PART: u32 = 0x1000_0130;
+const FICR_CONFIG_REVISION: u32 = 0x1000_0134;
+
+/// UICR.APPROTECT on the nRF52833, and its HwDisabled value (PS, UICR).
+const UICR_APPROTECT: u32 = 0x1000_1208;
+const HW_DISABLED: u32 = 0x5A;
 
 const CPUID: u32 = 0xE000_ED00;
 const AIRCR: u32 = 0xE000_ED0C;
@@ -111,6 +120,9 @@ pub fn program<L: Link>(
         pages,
         page
     ));
+    if chip == Chip::Nrf52 {
+        keep_open(dap, log)?;
+    }
 
     // Sorted, so the last word is the highest. Flash starts at 0, so that's
     // the only end to check. This is what keeps UICR segments out.
@@ -157,7 +169,10 @@ fn name(chip: Chip) -> &'static str {
 /// through the CTRL-AP, which is the only way back in.
 fn unlock<L: Link>(dap: &mut Dap<L>, log: &mut dyn FnMut(&str)) -> Result<(), String> {
     // APPROTECTSTATUS bit 0 reads 1 when protection is off.
-    if dap.read_ap(CTRL_AP, CTRL_AP_APPROTECTSTATUS)? & 1 == 1 {
+    let open = |dap: &mut Dap<L>| -> Result<bool, String> {
+        Ok(dap.read_ap(CTRL_AP, CTRL_AP_APPROTECTSTATUS)? & 1 == 1)
+    };
+    if open(dap)? {
         return Ok(());
     }
     log("access port protection is on, so erasing the whole chip through the CTRL-AP");
@@ -165,14 +180,65 @@ fn unlock<L: Link>(dap: &mut Dap<L>, log: &mut dyn FnMut(&str)) -> Result<(), St
     // ERASEALLSTATUS reads 0 once it's done; the probe polls for it.
     dap.wait_ap(CTRL_AP, CTRL_AP_ERASEALLSTATUS, 1, 0)
         .map_err(|e| format!("the CTRL-AP erase never finished: {e}"))?;
-    dap.write_ap(CTRL_AP, CTRL_AP_RESET, 1)?;
-    dap.write_ap(CTRL_AP, CTRL_AP_RESET, 0)?;
     dap.write_ap(CTRL_AP, CTRL_AP_ERASEALL, 0)?;
-    dap.clear_errors()?;
-    if dap.read_ap(CTRL_AP, CTRL_AP_APPROTECTSTATUS)? & 1 == 0 {
+    // A hardened nRF52833 is open as soon as the erase is done, until the
+    // next pin or power reset (PS, "Debug and trace"), so don't reset one
+    // that's already open. An older one may only notice at a reset.
+    if !open(dap)? {
+        dap.write_ap(CTRL_AP, CTRL_AP_RESET, 1)?;
+        dap.write_ap(CTRL_AP, CTRL_AP_RESET, 0)?;
+        dap.clear_errors()?;
+    }
+    if !open(dap)? {
         return Err("access port protection is still on after an erase".into());
     }
     Ok(())
+}
+
+/// On an nRF52833 with the hardened access port protection (revision 2,
+/// build code Bxx), sets UICR.APPROTECT to HwDisabled, so the access port
+/// stays open after a pin or power reset. That's only half of it: the
+/// firmware has to write APPROTECT.DISABLE as it boots too, which `board`
+/// does. Without both, every flash after a replug erases the whole chip.
+///
+/// A revision 1 chip is left alone, since HwDisabled isn't a value its
+/// UICR.APPROTECT knows.
+fn keep_open<L: Link>(dap: &mut Dap<L>, log: &mut dyn FnMut(&str)) -> Result<(), String> {
+    // nrfx's nrf52_configuration_249(), for the nRF52833.
+    let part = dap.read32(FICR_CONFIG_PART)?;
+    let revision = dap.read32(FICR_CONFIG_REVISION)?;
+    if part != 0x0D || revision == 0 {
+        return Ok(());
+    }
+    match dap.read32(UICR_APPROTECT)? {
+        HW_DISABLED => Ok(()),
+        u32::MAX => {
+            log("hardened access port protection, so setting UICR.APPROTECT to HwDisabled");
+            dap.write_each_and_wait(
+                &[
+                    (NVMC_CONFIG, CONFIG_WRITE),
+                    (UICR_APPROTECT, HW_DISABLED),
+                    (NVMC_CONFIG, CONFIG_READ),
+                ],
+                NVMC_READY,
+            )?;
+            match dap.read32(UICR_APPROTECT)? {
+                HW_DISABLED => Ok(()),
+                got => Err(format!(
+                    "UICR.APPROTECT reads {got:#010x} after writing HwDisabled"
+                )),
+            }
+        }
+        // Not erased, so setting it means erasing the whole UICR. Flashing
+        // still works, through an erase-all each time.
+        other => {
+            log(&format!(
+                "UICR.APPROTECT reads {other:#010x}, so the access port will lock again \
+                 on the next power-up and the next flash will erase the whole chip"
+            ));
+            Ok(())
+        }
+    }
 }
 
 /// Halts the core, then resets it with a vector catch so it stops before
@@ -376,6 +442,67 @@ mod tests {
         // The erase-all wiped the page the image doesn't touch.
         assert_eq!(fake.flash[0x1000 * 4], 0xFF);
         assert!(fake.running);
+    }
+
+    #[test]
+    fn leaves_a_revision_1_uicr_alone() {
+        let mut dap = connected(Fake::nrf52(true));
+        program(&mut dap, Chip::Nrf52, &image(), &mut |_| {}).unwrap();
+        let fake = dap.into_link();
+        // It needed the CTRL-AP reset to open, and HwDisabled means nothing
+        // to it.
+        assert_eq!(fake.ctrl_ap_resets, 1);
+        assert_eq!(fake.uicr_approtect, u32::MAX);
+    }
+
+    #[test]
+    fn opens_a_hardened_v2_and_keeps_it_open() {
+        let mut fake = Fake::nrf52_hardened();
+        fake.firmware_disables_approtect = true;
+        let mut dap = connected(fake);
+        let mut lines = Vec::new();
+        program(&mut dap, Chip::Nrf52, &image(), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        assert!(lines[0].contains("protection is on"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("HwDisabled")), "{lines:?}");
+        let mut fake = dap.into_link();
+        // Open straight after the erase, so no CTRL-AP reset to lock it.
+        assert_eq!(fake.ctrl_ap_resets, 0);
+        assert_eq!(fake.uicr_approtect, 0x5A);
+        assert!(fake.running);
+
+        // Unplugged and plugged back in, it's still open, so the next flash
+        // only erases the pages it needs.
+        fake.power_cycle();
+        let mut dap = connected(fake);
+        let mut lines = Vec::new();
+        program(&mut dap, Chip::Nrf52, &image(), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("protection is on") || l.contains("HwDisabled")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_hardened_v2_locks_again_without_the_firmwares_half() {
+        let mut dap = connected(Fake::nrf52_hardened());
+        program(&mut dap, Chip::Nrf52, &image(), &mut |_| {}).unwrap();
+        let mut fake = dap.into_link();
+        fake.power_cycle();
+        let mut dap = connected(fake);
+        let mut lines = Vec::new();
+        program(&mut dap, Chip::Nrf52, &image(), &mut |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        assert!(lines[0].contains("protection is on"), "{lines:?}");
     }
 
     #[test]
