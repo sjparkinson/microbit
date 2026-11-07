@@ -20,6 +20,7 @@ fn main() -> ! {
         mut display,
         mut buttons,
         mut timer,
+        ..
     }) = board::Board::take()
     else {
         panic!("board taken twice");

@@ -212,6 +212,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "level"
+version = "0.0.0"
+dependencies = [
+ "board",
+ "cortex-m-rt",
+ "panic-halt",
+]
+
+[[package]]
 name = "life"
 version = "0.0.0"
 dependencies = [

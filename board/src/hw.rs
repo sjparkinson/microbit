@@ -9,9 +9,9 @@ use bsp::display::blocking;
 use bsp::gpio::{BTN_A, BTN_B};
 use bsp::hal::{self, pac};
 use embedded_hal::delay::DelayNs;
-use embedded_hal::digital::InputPin;
+use embedded_hal::digital::{InputPin, OutputPin};
 
-use crate::Image;
+use crate::{Image, SensorError, Tilt};
 
 /// The parts of the micro:bit that both versions have.
 ///
@@ -25,6 +25,9 @@ pub struct Board {
     pub buttons: Buttons,
     /// A microsecond timer for delays, on TIMER0.
     pub timer: Timer,
+    /// The motion sensor, not yet spoken to. [`MotionSensor::accelerometer`]
+    /// turns it on.
+    pub motion: MotionSensor,
 }
 
 impl Board {
@@ -37,14 +40,158 @@ impl Board {
         let board = bsp::Board::take()?;
         #[cfg(feature = "v2")]
         crate::approtect::keep_debug_port_open();
+        let mut timer = hal::Timer::new(board.TIMER0);
+        // The v1 has one I2C bus, shared with the edge connector, and the v2
+        // has the sensor on an internal bus of its own.
+        #[cfg(feature = "v1")]
+        let bus = {
+            let hal::twi::Pins { scl, sda } = board.i2c.into();
+            let (scl, sda) = free_bus(scl, sda, &mut timer);
+            hal::Twi::new(
+                board.TWI0,
+                hal::twi::Pins { scl, sda },
+                hal::twi::Frequency::K100,
+            )
+        };
+        #[cfg(feature = "v2")]
+        let bus = {
+            let hal::twim::Pins { scl, sda } = board.i2c_internal.into();
+            let (scl, sda) = free_bus(scl, sda, &mut timer);
+            hal::Twim::new(
+                board.TWIM0,
+                hal::twim::Pins { scl, sda },
+                hal::twim::Frequency::K100,
+            )
+        };
         Some(Self {
             display: Display(blocking::Display::new(board.display_pins)),
             buttons: Buttons {
                 a: board.buttons.button_a,
                 b: board.buttons.button_b,
             },
-            timer: Timer(hal::Timer::new(board.TIMER0)),
+            timer: Timer(timer),
+            motion: MotionSensor(bus),
         })
+    }
+}
+
+type BusPin = hal::gpio::Pin<hal::gpio::Input<hal::gpio::Floating>>;
+
+/// Lets go of a sensor left stuck part-way through an I2C read.
+///
+/// A reset restarts the nRF but not the sensor, which keeps its power. If
+/// the reset lands while the sensor's sending a byte, it can be left holding
+/// SDA low, waiting for clocks that never come, and then nothing can start a
+/// transfer: the nRF51's TWI waits for the bus forever. So this clocks SCL
+/// nine times, which is enough to finish any byte and its acknowledge, then
+/// sends a STOP. With the bus already idle, it's a few harmless pulses that
+/// nothing answers.
+fn free_bus(scl: BusPin, sda: BusPin, timer: &mut impl DelayNs) -> (BusPin, BusPin) {
+    use hal::gpio::{Level, OpenDrainConfig::Standard0Disconnect1};
+    // Driving an nRF output can't fail; the error type is `Infallible`.
+    let mut scl = scl.into_open_drain_output(Standard0Disconnect1, Level::High);
+    let mut sda = sda.into_open_drain_output(Standard0Disconnect1, Level::High);
+    // 5 µs a half-clock is 100 kHz, the speed the bus runs at anyway.
+    for _ in 0..9 {
+        scl.set_low().ok();
+        timer.delay_us(5);
+        scl.set_high().ok();
+        timer.delay_us(5);
+    }
+    // A STOP is SDA rising while SCL is high.
+    scl.set_low().ok();
+    sda.set_low().ok();
+    timer.delay_us(5);
+    scl.set_high().ok();
+    timer.delay_us(5);
+    sda.set_high().ok();
+    timer.delay_us(5);
+    (scl.into_floating_input(), sda.into_floating_input())
+}
+
+/// The I2C bus the motion sensor's on.
+#[cfg(feature = "v1")]
+type SensorBus = hal::Twi<pac::TWI0>;
+#[cfg(feature = "v2")]
+type SensorBus = hal::Twim<pac::TWIM0>;
+
+/// The motion sensor, on its I2C bus, before anything's been sent to it.
+pub struct MotionSensor(SensorBus);
+
+impl MotionSensor {
+    /// Checks the chip is an LSM303AGR and turns its accelerometer on.
+    ///
+    /// It talks to the chip, so it blocks for the length of three short I2C
+    /// transfers. [`Board::take`] leaves it to the firmware so that a
+    /// firmware can have something on the display first.
+    pub fn accelerometer(self) -> Result<Accelerometer, SensorError> {
+        Accelerometer::new(self.0)
+    }
+}
+
+/// The LSM303AGR's accelerometer, at 7-bit I2C address 0x19.
+const LSM303AGR_A: u8 = 0x19;
+/// `WHO_AM_I_A`, which reads 0x33 on an LSM303AGR.
+const WHO_AM_I_A: u8 = 0x0f;
+/// `CTRL_REG1_A`: data rate and which axes are on.
+const CTRL_REG1_A: u8 = 0x20;
+/// `CTRL_REG4_A`: range, resolution and block data update.
+const CTRL_REG4_A: u8 = 0x23;
+/// `OUT_X_L_A`, the first of the six output registers.
+const OUT_X_L_A: u8 = 0x28;
+/// Set in a register address to read on through the next ones.
+const AUTO_INCREMENT: u8 = 0x80;
+
+/// The accelerometer in an ST LSM303AGR, which every v1.5 has and some v2s
+/// do.
+///
+/// The v1.3x has an NXP MMA8653FC instead, and a v2 may have an NXP
+/// FXOS8700CQ. Neither is supported, so those boards get no accelerometer.
+/// It's set to 100 readings a second at ±2 g in high-resolution mode, and
+/// takes 70 ms after it's turned on to settle, so the first few readings can
+/// be off.
+pub struct Accelerometer(SensorBus);
+
+impl Accelerometer {
+    fn new(bus: SensorBus) -> Result<Self, SensorError> {
+        let mut sensor = Self(bus);
+        let mut id = [0];
+        sensor.read_registers(WHO_AM_I_A, &mut id)?;
+        if id[0] != 0x33 {
+            return Err(SensorError::WrongChip(id[0]));
+        }
+        // Block data update (so a reading's two bytes always match),
+        // ±2 g, high resolution.
+        sensor.write_register(CTRL_REG4_A, 0x88)?;
+        // 100 Hz, normal power, X, Y and Z on.
+        sensor.write_register(CTRL_REG1_A, 0x57)?;
+        Ok(sensor)
+    }
+
+    /// The latest reading. Reading faster than 100 times a second returns
+    /// the same one again.
+    pub fn read(&mut self) -> Result<Tilt, SensorError> {
+        let mut raw = [0; 6];
+        self.read_registers(OUT_X_L_A | AUTO_INCREMENT, &mut raw)?;
+        Ok(Tilt::from_lsm303agr(raw))
+    }
+
+    // These call the HALs' own methods rather than embedded-hal's `I2c`.
+    // nrf-hal's `I2c` for the nRF51's TWI starts a read without the
+    // shortcuts that pause the bus after each byte, which the nRF51 needs,
+    // and hangs. The buffers are locals, never `&[CONST]`, because the v2's
+    // TWIM can only send from RAM and a promoted constant lives in flash.
+
+    fn read_registers(&mut self, register: u8, buffer: &mut [u8]) -> Result<(), SensorError> {
+        let tx = [register];
+        self.0
+            .write_then_read(LSM303AGR_A, &tx, buffer)
+            .map_err(|_| SensorError::Bus)
+    }
+
+    fn write_register(&mut self, register: u8, value: u8) -> Result<(), SensorError> {
+        let tx = [register, value];
+        self.0.write(LSM303AGR_A, &tx).map_err(|_| SensorError::Bus)
     }
 }
 

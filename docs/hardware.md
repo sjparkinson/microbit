@@ -78,10 +78,28 @@ P0.09 and P0.10 can be the nRF52833's NFC antenna pins, and the schematic notes 
 ## Motion sensor and I2C
 
 - v1.3x: an NXP MMA8653FC accelerometer and a separate MAG3110 magnetometer ([1.3x page](https://tech.microbit.org/hardware/1-3-revision/)). Confirmed.
-- v1.5: one combined chip. The page says "LSM303GR", which I read as a typo for the LSM303AGR the v2 uses. Likely.
+- v1.5: an ST LSM303AGR, accelerometer and magnetometer in one chip, as U2 ([V1.5 BOM](https://github.com/bbcmicrobit/hardware/blob/426f98b6d0e9c83367d7c4094d0b4a33b3665525/V1.5/Bill%20of%20Materials-BBC-microbit_v1.5.csv) line 37, [V1.5 schematic](https://github.com/bbcmicrobit/hardware/blob/426f98b6d0e9c83367d7c4094d0b4a33b3665525/V1.5/SCH_BBC-Microbit_V1.5.PDF) sheet 3). Confirmed. The [1.5 page](https://tech.microbit.org/hardware/1-5-revision/)'s table says "LSM303GR", a typo: its text says LSM303AGR, and that "all V1.5 boards have been manufactured with the LSM303AGR" to date. The schematic also has an unfitted FXOS8700CQ footprint (U1), which isn't in the BOM.
 - v2: a footprint for either an ST LSM303AGR or an NXP FXOS8700CQ, and "only one sensor will ever be placed" ([2.2x page](https://tech.microbit.org/hardware/2-2-revision/#motion-sensor)). Confirmed. So a v2 firmware that reads the sensor has to detect which one it's got, as the micro:bit's own runtime does.
 
 On the v1 the sensor's I2C bus is also the edge connector's (SCL P0.00, SDA P0.30, from nrf-rs). On the v2 they're separate: internal SCL P0.08 and SDA P0.16, external SCL P0.26 and SDA P1.00 ([V2 pinmap](https://tech.microbit.org/hardware/schematic/#v2-pinmap)). The internal bus also reaches the interface chip, with "a custom protocol" ([DAPLink page](https://tech.microbit.org/software/daplink-interface/)). Confirmed.
+
+On the v1.5 the bus has 4k7 pull-ups, and the accelerometer's INT1 goes to P0.28 (a net still named `MMA8653FC_INT1` from the 1.3) and the magnetometer's interrupt to P0.29. INT2 isn't wired ([V1.5 schematic](https://github.com/bbcmicrobit/hardware/blob/426f98b6d0e9c83367d7c4094d0b4a33b3665525/V1.5/SCH_BBC-Microbit_V1.5.PDF) sheets 3 and 5). Confirmed. `board` polls, so it uses neither.
+
+### The LSM303AGR
+
+From the [ST datasheet](https://www.st.com/resource/en/datasheet/lsm303agr.pdf) (DocID027765 Rev 11). Confirmed for the chip.
+
+- The accelerometer is at 7-bit address 0x19 and the magnetometer at 0x1E (section 6.1). The V1.5 schematic annotates the same.
+- `WHO_AM_I_A` (0x0F) reads 0x33 (section 8.4).
+- `CTRL_REG1_A` (0x20) sets the data rate in its top four bits (0101 is 100 Hz) and turns on X, Y and Z in its bottom three. `CTRL_REG4_A` (0x23) has block data update in bit 7, the range in bits 5:4 (00 is ±2 g) and high resolution in bit 3 (sections 8.6 and 8.9). `board` writes 0x57 and 0x88.
+- The outputs are `OUT_X_L_A` to `OUT_Z_H_A` (0x28 to 0x2D), low byte first, two's complement and left-justified. Setting bit 7 of the register address reads on through the next ones (sections 6.1, 8.14 to 8.16).
+- High resolution is 12 bits, at 0.98 mg a step at ±2 g, and takes 7 readings' time to settle after it's turned on (Tables 3 and 14).
+
+The micro:bit's runtime turns the chip's axes into the board's in two steps. Its driver first makes (-y, -x, z) of them ([microbit-dal `LSM303Accelerometer.cpp`](https://github.com/lancaster-university/microbit-dal/blob/318c6abbb3d952d3f49a595a726486230e82fb5b/source/drivers/LSM303Accelerometer.cpp), and the same in [codal-core's](https://github.com/lancaster-university/codal-core/blob/master/source/drivers/LSM303Accelerometer.cpp) for the v2). Then a `CoordinateSpace(SIMPLE_CARTESIAN, true, COORDINATE_SPACE_ROTATED_0)` flips and swaps them again ([`CoordinateSystem.cpp`](https://github.com/lancaster-university/codal-core/blob/master/source/types/CoordinateSystem.cpp)). Confirmed for the source. Put together, what MakeCode reports is the chip's (x, -y, z), and that's what `Tilt` does. On a v1.5 that puts x growing as the right edge (button B's) tips down and y growing as the edge connector tips down, which is what MakeCode's gestures expect ([`Accelerometer.cpp`](https://github.com/lancaster-university/codal-core/blob/master/source/driver-models/Accelerometer.cpp)). Confirmed on a v1.5 with the `level` firmware. MakeCode's docs say z reads -1023 lying face up ([acceleration](https://makecode.microbit.org/reference/input/acceleration)). Likely for `Tilt`, as nothing here has shown z.
+
+A reset restarts the nRF but not the sensor, so a reset in the middle of a read can leave the LSM303AGR holding SDA low. After that the nRF51's TWI waits forever for the bus, and a v1.5 hung like that until `board` started clocking SCL nine times and sending a STOP before turning the TWI on. Confirmed on a v1.5. That first hang started with nrf-hal 0.19's embedded-hal `I2c` for the nRF51 TWI, which reads without the shortcuts the nRF51 needs to pause the bus between bytes. `board` calls the HAL's own `write_then_read`, which uses them. Likely: the fix and the recovery went on together, so the board never showed which one mattered.
+
+The runtime finds its sensor by probing each chip's `WHO_AM_I` in turn: MMA8653 (7-bit 0x1D, register 0x0D, 0x5A), then LSM303 (0x19, 0x0F, 0x33), then FXOS8700 (0x1E, 0x0D, 0xC7) ([microbit-dal `MicroBitAccelerometer.cpp`](https://github.com/lancaster-university/microbit-dal/blob/318c6abbb3d952d3f49a595a726486230e82fb5b/source/drivers/MicroBitAccelerometer.cpp)). Confirmed for the runtime. `board` only probes for the LSM303AGR.
 
 ## Serial
 
@@ -123,7 +141,7 @@ Both read their core temperature from the Nordic chip: -25 to 75 °C, ±4 °C un
 ## Open questions
 
 - What does the BSP do with P0.09 and P0.10 on the v2, and does a firmware need to set NFCPINS in the UICR to use them as GPIO?
-- Does a 1.5 have an LSM303AGR, as I'm assuming from the "LSM303GR" typo?
+- Does the v2's LSM303AGR read the same way round as the v1.5's? The runtime treats them the same, but `level` has only run on a v1.5.
 - Do the v2.0 and v2.2x put the interface chip at the same I2C address on the internal bus? Nothing here talks to it yet.
 - What board IDs do the 2.0, 2.20 and 2.21 report in `DETAILS.TXT`? Plugging each one in would settle it.
 - Which v2 revisions have a hardened nRF52833 (build code Bxx)? Reading FICR 0x10000134 over SWD on each would settle it, and so would the build code printed on the chip.
