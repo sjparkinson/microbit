@@ -48,11 +48,15 @@ compile_error!(
 );
 
 /// A picture for the LED matrix: five rows of five, top row first, leftmost
-/// LED first. Anything other than 0 is lit.
+/// LED first.
 ///
-/// The blocking display underneath has no brightness levels, so 1 and 9 look
-/// the same.
+/// `Display::show` lights anything other than 0 at full brightness, so 1
+/// and 9 look the same there. `Display::show_greyscale` reads each as a
+/// brightness from 0 (off) to [`MAX_BRIGHTNESS`].
 pub type Image = [[u8; 5]; 5];
+
+mod matrix;
+pub use matrix::MAX_BRIGHTNESS;
 
 /// One reading from the accelerometer, in milli-g (1000 is one g) on each of
 /// the board's axes.

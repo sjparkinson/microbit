@@ -5,13 +5,12 @@
 // dependency.
 use microbit as bsp;
 
-use bsp::display::blocking;
 use bsp::gpio::{BTN_A, BTN_B};
 use bsp::hal::{self, pac};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::{InputPin, OutputPin};
 
-use crate::{Image, SensorError, Tilt};
+use crate::{Image, SensorError, Tilt, matrix};
 
 /// The parts of the micro:bit that both versions have.
 ///
@@ -64,7 +63,7 @@ impl Board {
             )
         };
         Some(Self {
-            display: Display(blocking::Display::new(board.display_pins)),
+            display: Display::new(board.display_pins),
             buttons: Buttons {
                 a: board.buttons.button_a,
                 b: board.buttons.button_b,
@@ -197,50 +196,96 @@ impl Accelerometer {
 
 /// The LED matrix, driven by the CPU a row at a time.
 ///
-/// Nothing lights unless [`Display::show`] is running: it scans the rows
-/// itself, so the CPU's busy for as long as the picture's up. The v1 wires
-/// its 25 LEDs as a 3×9 grid rather than 5×5; the BSP hides that.
-pub struct Display(blocking::Display);
+/// Nothing lights unless [`Display::show`] or [`Display::show_greyscale`] is
+/// running: they scan the rows themselves, so the CPU's busy for as long as
+/// the picture's up. A row is lit by driving it high and its columns low.
+/// The v1 wires its 25 LEDs as a 3×9 grid rather than 5×5, which
+/// `matrix.rs` lays out.
+pub struct Display {
+    rows: [Led; ROWS],
+    cols: [Led; COLS],
+}
 
-/// How long the BSP's blocking display lights each row, in milliseconds. It's
-/// the BSP's default.
-const ROW_MS: u32 = 2;
+type Led = hal::gpio::Pin<hal::gpio::Output<hal::gpio::PushPull>>;
 
-/// How many rows the display scans: 5 on the v2, and 3 on the v1, which
-/// wires its 25 LEDs as a 3×9 grid.
-const ROWS: u32 = bsp::gpio::NUM_ROWS as u32;
+/// How many rows the display scans: 5 on the v2, and 3 on the v1.
+const ROWS: usize = bsp::gpio::NUM_ROWS;
+/// How many columns each row has: 5 on the v2, and 9 on the v1.
+const COLS: usize = bsp::gpio::NUM_COLS;
 
 impl Display {
-    /// Shows `image` for `duration_ms` milliseconds, on either board, then
+    fn new(pins: bsp::gpio::DisplayPins) -> Self {
+        let (cols, rows) = pins.degrade();
+        let mut display = Self { rows, cols };
+        display.clear();
+        display
+    }
+
+    /// Shows `image` for `duration_ms` milliseconds with every lit LED at
+    /// full brightness, then turns every LED off.
+    pub fn show(&mut self, timer: &mut Timer, image: &Image, duration_ms: u32) {
+        self.show_greyscale(timer, &matrix::full(image), duration_ms);
+    }
+
+    /// Shows `image` for `duration_ms` milliseconds with each LED at its
+    /// brightness, 0 to [`MAX_BRIGHTNESS`](crate::MAX_BRIGHTNESS), then
     /// turns every LED off.
     ///
-    /// The BSP only lights whole scans of the matrix at 2 ms a row, which is
-    /// 10 ms on the v2 and 6 ms on the v1, and on its own it returns early
-    /// by whatever's left over. This fills that remainder with one quicker
-    /// scan at 1 ms a row where it fits, so every row still gets the same
-    /// time lit, then waits out the rest (under a row's worth) dark. So a
-    /// 10 ms show on the v1 is 9 ms lit and 1 ms dark, and anything under
-    /// a quick scan (5 ms on the v2, 3 ms on the v1) is only a wait.
-    pub fn show(&mut self, timer: &mut Timer, image: &Image, duration_ms: u32) {
-        let scan_ms = ROWS * ROW_MS;
-        let mut rest_ms = duration_ms % scan_ms;
-        self.0.show(&mut timer.0, *image, duration_ms - rest_ms);
-        // A whole scan at ROW_MS doesn't fit in `rest_ms`, so at most one at
-        // 1 ms a row does.
-        if rest_ms >= ROWS {
-            self.0.set_delay_ms(1);
-            self.0.show(&mut timer.0, *image, ROWS);
-            self.0.set_delay_ms(ROW_MS);
-            rest_ms -= ROWS;
+    /// It lights whole scans of the matrix, 1 ms a row, and waits out
+    /// whatever's left under a scan dark: up to 2 ms on the v1, and 4 ms on
+    /// the v2.
+    pub fn show_greyscale(&mut self, timer: &mut Timer, image: &Image, duration_ms: u32) {
+        #[cfg(feature = "v1")]
+        let levels = matrix::v1_matrix(image);
+        #[cfg(feature = "v2")]
+        let levels = matrix::v2_matrix(image);
+        let scan_us = ROWS as u32 * matrix::ROW_US;
+        let total_us = duration_ms * 1000;
+        for _ in 0..total_us / scan_us {
+            for (row, levels) in levels.iter().enumerate() {
+                self.light_row(timer, row, levels);
+            }
         }
-        if rest_ms > 0 {
-            timer.0.delay_ms(rest_ms);
+        timer.delay_us(total_us % scan_us);
+    }
+
+    /// Lights one row for [`matrix::ROW_US`], each LED for its brightness's
+    /// share. Everything starts on together, then each level goes off at
+    /// its time, so a row costs one wait per level in use.
+    fn light_row(&mut self, timer: &mut Timer, row: usize, levels: &[u8; COLS]) {
+        // Driving an nRF output can't fail; the error type is `Infallible`.
+        for (col, &level) in self.cols.iter_mut().zip(levels) {
+            if level > 0 {
+                col.set_low().ok();
+            }
         }
+        self.rows[row].set_high().ok();
+        let mut lit_us = 0;
+        for level in 1..=crate::MAX_BRIGHTNESS {
+            if !levels.contains(&level) {
+                continue;
+            }
+            let on_us = matrix::ON_US[usize::from(level)];
+            timer.delay_us(on_us - lit_us);
+            lit_us = on_us;
+            for (col, &l) in self.cols.iter_mut().zip(levels) {
+                if l == level {
+                    col.set_high().ok();
+                }
+            }
+        }
+        self.rows[row].set_low().ok();
+        timer.delay_us(matrix::ROW_US - lit_us);
     }
 
     /// Turns every LED off.
     pub fn clear(&mut self) {
-        self.0.clear();
+        for row in &mut self.rows {
+            row.set_low().ok();
+        }
+        for col in &mut self.cols {
+            col.set_high().ok();
+        }
     }
 }
 
@@ -268,20 +313,29 @@ impl Buttons {
 }
 
 /// TIMER0, running at 1 MHz, for blocking delays.
+///
+/// A wait of zero returns at once. The HAL's doesn't: it clears the counter
+/// and waits for it to match the count, and a counter that's already moved
+/// off 0 doesn't match 0 again until it wraps, over an hour later. That hung
+/// a v1.5 the first time the display asked for one.
 pub struct Timer(hal::Timer<pac::TIMER0>);
 
 impl DelayNs for Timer {
     /// Rounds down to a whole microsecond, which is the timer's tick, so
     /// anything under 1000 ns doesn't wait at all.
     fn delay_ns(&mut self, ns: u32) {
-        self.0.delay_ns(ns);
+        self.delay_us(ns / 1000);
     }
 
     fn delay_us(&mut self, us: u32) {
-        self.0.delay_us(us);
+        if us > 0 {
+            self.0.delay_us(us);
+        }
     }
 
     fn delay_ms(&mut self, ms: u32) {
-        self.0.delay_ms(ms);
+        if ms > 0 {
+            self.0.delay_ms(ms);
+        }
     }
 }

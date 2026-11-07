@@ -49,7 +49,7 @@ fn main() -> ! {
         let frame = game.tick(tilt, buttons.a_pressed(), buttons.b_pressed());
         // The show is the tick's timing, so the tick runs a hair over
         // TICK_MS with the I2C read.
-        display.show(&mut timer, &frame, TICK_MS);
+        display.show_greyscale(&mut timer, &frame, TICK_MS);
     }
 }
 

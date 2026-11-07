@@ -2,13 +2,14 @@
 //! right by tipping the board. The maze is 15×15 LEDs' worth, so the 5×5
 //! display is a window that follows the marble around.
 //!
-//! Walls are lit, the marble blinks slowly, and the goal flickers. Reaching
-//! the goal sends rings out from the middle, then a new maze starts. A puts
-//! the marble back at the start; B swaps in a new maze.
+//! Walls are dim, the marble's bright, and the goal pulses. Reaching the
+//! goal sends rings out from the middle, then a new maze starts. A puts the
+//! marble back at the start; B swaps in a new maze. Frames are greyscale,
+//! for `Display::show_greyscale`.
 
 #![no_std]
 
-use board::{Image, Tilt};
+use board::{Image, MAX_BRIGHTNESS, Tilt};
 
 /// How long each tick shows for, in milliseconds. Each tick reads the
 /// accelerometer once and moves the marble once.
@@ -40,8 +41,15 @@ const PUSH_DIV: i32 = 160;
 /// 30 pixels a second.
 const MAX_SPEED: i32 = 160;
 
-/// How many ticks the marble's blink takes: 400 ms, lit for three quarters.
-const BLINK_TICKS: u32 = 20;
+/// How bright walls are, out of [`MAX_BRIGHTNESS`]: dim enough that the
+/// marble stands out without blinking.
+const WALL: u8 = 3;
+
+/// How many ticks the goal's pulse takes, dim to bright and back: 600 ms.
+const PULSE_TICKS: u32 = 30;
+
+/// How bright the trail behind each win ring is.
+const TRAIL: u8 = 3;
 
 /// How many ticks the rings play for after reaching the goal: 1.2 s.
 const WIN_TICKS: u32 = 60;
@@ -350,8 +358,8 @@ impl Game {
         self.won = None;
     }
 
-    /// The window around the marble: walls lit, the marble blinking slowly,
-    /// the goal flickering.
+    /// The window around the marble: walls dim, the marble at full, the
+    /// goal pulsing.
     fn frame(&self) -> Image {
         let (mx, my) = self.marble.pixel();
         let ox = window(mx);
@@ -359,14 +367,16 @@ impl Game {
         let mut image = [[0; VIEW]; VIEW];
         for (row, line) in image.iter_mut().enumerate() {
             for (col, led) in line.iter_mut().enumerate() {
-                *led = u8::from(self.maze.is_wall(ox + col, oy + row));
+                if self.maze.is_wall(ox + col, oy + row) {
+                    *led = WALL;
+                }
             }
         }
         let (gx, gy) = GOAL;
         if (ox..ox + VIEW).contains(&gx) && (oy..oy + VIEW).contains(&gy) {
-            image[gy - oy][gx - ox] = u8::from((self.ticks / 2).is_multiple_of(2));
+            image[gy - oy][gx - ox] = pulse(self.ticks);
         }
-        image[my - oy][mx - ox] = u8::from(self.ticks % BLINK_TICKS < BLINK_TICKS * 3 / 4);
+        image[my - oy][mx - ox] = MAX_BRIGHTNESS;
         image
     }
 
@@ -383,14 +393,34 @@ fn window(at: usize) -> usize {
     at.saturating_sub(VIEW / 2).min(SIZE - VIEW)
 }
 
-/// The win's frame `elapsed` ticks in: a square ring around the middle LED,
-/// growing outwards and starting over.
+/// The goal's brightness `ticks` in: up from 1 to [`MAX_BRIGHTNESS`] and
+/// back down again every [`PULSE_TICKS`].
+fn pulse(ticks: u32) -> u8 {
+    let half = PULSE_TICKS / 2;
+    let phase = ticks % PULSE_TICKS;
+    let up = if phase < half {
+        phase
+    } else {
+        PULSE_TICKS - phase
+    };
+    // `up` is at most `half`, so this is at most MAX_BRIGHTNESS.
+    1 + (up * u32::from(MAX_BRIGHTNESS - 1) / half) as u8
+}
+
+/// The win's frame `elapsed` ticks in: a bright square ring around the
+/// middle LED with a dim one just inside it, growing outwards and starting
+/// over.
 fn rings(elapsed: u32) -> Image {
     let ring = (elapsed / RING_TICKS % 3) as usize;
     let mut image = [[0; VIEW]; VIEW];
     for (row, line) in image.iter_mut().enumerate() {
         for (col, led) in line.iter_mut().enumerate() {
-            *led = u8::from(row.abs_diff(2).max(col.abs_diff(2)) == ring);
+            let distance = row.abs_diff(2).max(col.abs_diff(2));
+            if distance == ring {
+                *led = MAX_BRIGHTNESS;
+            } else if distance + 1 == ring {
+                *led = TRAIL;
+            }
         }
     }
     image
@@ -559,27 +589,47 @@ mod tests {
     fn the_first_frame_shows_the_top_left_corner_and_the_marble() {
         let mut game = Game::new(5);
         let frame = game.tick(FLAT, false, false);
-        assert_eq!(frame[0], [1; 5]);
-        assert_eq!(frame[1][0], 1);
-        // Lit, as the blink starts on.
-        assert_eq!(frame[1][1], 1);
+        assert_eq!(frame[0], [WALL; 5]);
+        assert_eq!(frame[1][0], WALL);
+        assert_eq!(frame[1][1], MAX_BRIGHTNESS);
         let maze = *game.maze();
         for (row, line) in frame.iter().enumerate() {
             for (col, &led) in line.iter().enumerate() {
                 if (col, row) != START {
-                    assert_eq!(led, u8::from(maze.is_wall(col, row)));
+                    let wall = if maze.is_wall(col, row) { WALL } else { 0 };
+                    assert_eq!(led, wall);
                 }
             }
         }
     }
 
     #[test]
-    fn the_marble_blinks() {
+    fn the_marble_stays_at_full_brightness() {
         let mut game = Game::new(5);
-        let lit: u32 = (0..BLINK_TICKS)
-            .map(|_| u32::from(game.tick(FLAT, false, false)[1][1]))
-            .sum();
-        assert_eq!(lit, BLINK_TICKS * 3 / 4);
+        for _ in 0..50 {
+            assert_eq!(game.tick(FLAT, false, false)[1][1], MAX_BRIGHTNESS);
+        }
+    }
+
+    #[test]
+    fn the_goal_pulses_between_dim_and_bright() {
+        let levels: [u8; PULSE_TICKS as usize] = core::array::from_fn(|t| pulse(t as u32));
+        assert_eq!(levels[0], 1);
+        assert_eq!(levels[PULSE_TICKS as usize / 2], MAX_BRIGHTNESS);
+        assert!(levels.iter().all(|&l| (1..=MAX_BRIGHTNESS).contains(&l)));
+        assert_eq!(pulse(PULSE_TICKS), pulse(0));
+    }
+
+    #[test]
+    fn the_goal_shows_when_the_window_reaches_it() {
+        let mut game = Game::new(5);
+        game.maze = room();
+        game.marble = Marble::at((GOAL.0 - 2, GOAL.1));
+        let frame = game.tick(FLAT, false, false);
+        // The window starts at column 9 and row 10, against the bottom edge,
+        // so the goal's two to the right of the marble on row 3.
+        assert_eq!(frame[3][4], pulse(game.ticks));
+        assert_eq!(frame[3][2], MAX_BRIGHTNESS);
     }
 
     #[test]
@@ -625,9 +675,13 @@ mod tests {
 
     #[test]
     fn rings_grow_from_the_middle() {
-        assert_eq!(rings(0)[2], [0, 0, 1, 0, 0]);
-        assert_eq!(rings(RING_TICKS)[1], [0, 1, 1, 1, 0]);
-        assert_eq!(rings(2 * RING_TICKS)[0], [1; 5]);
+        const M: u8 = MAX_BRIGHTNESS;
+        assert_eq!(rings(0)[2], [0, 0, M, 0, 0]);
+        assert_eq!(rings(RING_TICKS)[1], [0, M, M, M, 0]);
+        assert_eq!(rings(RING_TICKS)[2], [0, M, TRAIL, M, 0]);
+        assert_eq!(rings(2 * RING_TICKS)[0], [M; 5]);
+        assert_eq!(rings(2 * RING_TICKS)[1], [M, TRAIL, TRAIL, TRAIL, M]);
+        assert_eq!(rings(2 * RING_TICKS)[2][2], 0);
         assert_eq!(rings(3 * RING_TICKS), rings(0));
     }
 
