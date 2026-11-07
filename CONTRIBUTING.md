@@ -32,6 +32,8 @@ xtask/                  list, build, flash, check; no dependencies
   src/nrf.rs            erase, write, verify and reset through the nRF's NVMC
   src/fake.rs           a pretend micro:bit for the tests, at the CMSIS-DAP level
 docs/                   hardware, flashing
+scripts/
+  daplink-update.sh     interface firmware updates on macOS, where dragging the hex times out
 ```
 
 `board` has features `v1` and `v2`. With `v1` it pulls in the [`microbit`](https://crates.io/crates/microbit) crate, with `v2` [`microbit-v2`](https://crates.io/crates/microbit-v2), and with neither it's only the types the host tests need. Each firmware has the same two features, passed straight through.

@@ -96,7 +96,7 @@ v1 from nrf-rs, v2 from nrf-rs and the pinmap. Confirmed. The pinmap names these
 
 ## The interface chip
 
-The USB port doesn't go to the target. It goes to a second microcontroller running Arm's [DAPLink](https://tech.microbit.org/software/daplink-interface/), which gives you the MICROBIT drive for drag-and-drop flashing, the serial port, and a CMSIS-DAP debug probe on the target's SWD pins. Only the drive is used here. It has no connection to the edge connector. Confirmed.
+The USB port doesn't go to the target. It goes to a second microcontroller running Arm's [DAPLink](https://tech.microbit.org/software/daplink-interface/), which gives you the MICROBIT drive for drag-and-drop flashing, the serial port, and a CMSIS-DAP debug probe on the target's SWD pins. Only the debug probe is used here. It has no connection to the edge connector. Confirmed.
 
 | Revision | Interface chip | Shipped DAPLink | Latest tested |
 |---|---|---|---|
@@ -106,7 +106,7 @@ The USB port doesn't go to the target. It goes to a second microcontroller runni
 | 2.20 | Nordic nRF52820-QDAA, or nRF52833-QDAA on a limited run | 0256 | 0257 |
 | 2.21 | the same | 0257 | 0257 |
 
-Chips from the revision pages, versions from the [DAPLink page](https://tech.microbit.org/software/daplink-interface/) (which also lists a 0258 beta for 2.00 and 2.2x). Confirmed. The two 2.2x interface chips run "the same DAPLink firmware image" ([2.2x page](https://tech.microbit.org/hardware/2-2-revision/#interface)). Confirmed.
+Chips from the revision pages, versions from the [DAPLink page](https://tech.microbit.org/software/daplink-interface/) (which also lists a 0258 beta for 2.00 and 2.2x). Confirmed. The [firmware download page](https://microbit.org/get-started/user-guide/firmware/) offers 0249 for every v1, not 0253, so "latest tested" isn't what you can download. Confirmed. A v1.5 here runs 0249 on bootloader 0243. In MAINTENANCE mode its `DETAILS.TXT` says `Daplink Mode: Bootloader` and `USB Interfaces: MSD`, so there's no debug probe until the interface firmware is running. Confirmed on that board. The two 2.2x interface chips run "the same DAPLink firmware image" ([2.2x page](https://tech.microbit.org/hardware/2-2-revision/#interface)). Confirmed.
 
 On the v1, the KL26 also contains the regulator that powers the rest of the board from USB, rated 120 mA. The v2 has its own regulator, rated 300 mA ([schematic notes](https://tech.microbit.org/hardware/schematic/#power-supply)). Confirmed.
 
