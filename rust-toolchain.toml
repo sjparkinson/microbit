@@ -7,7 +7,7 @@
 # thumbv6m-none-eabi is the v1's nRF51822 (Cortex-M0), thumbv7em-none-eabihf
 # the v2's nRF52833 (Cortex-M4F).
 [toolchain]
-channel = "1.99.1"
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]
 targets = ["thumbv6m-none-eabi", "thumbv7em-none-eabihf"]
 profile = "minimal"
